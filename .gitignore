@@ -1,0 +1,12 @@
+# Original downloaded template; keep the working copy local.
+Plantilla_TFG_FIUM___Actualizado_2025/
+
+# Local editor configuration.
+.vscode/
+
+# Keep LaTeX sources and generated artifacts local.
+doc/**
+
+# Version only the compiled dissertation PDF.
+!doc/
+!doc/main.pdf
