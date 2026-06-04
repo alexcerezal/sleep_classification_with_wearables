@@ -3,6 +3,7 @@ Plantilla_TFG_FIUM___Actualizado_2025/
 
 # Local editor configuration.
 .vscode/
+.codex_pdf_text/
 
 # Keep LaTeX sources and generated artifacts local.
 doc/**
@@ -10,3 +11,21 @@ doc/**
 # Version only the compiled dissertation PDF.
 !doc/
 !doc/main.pdf
+
+# Python virtual environments and caches.
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local datasets and generated experiment outputs.
+data/
+outputs/
+runs/
+checkpoints/
+references/
