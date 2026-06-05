@@ -25,6 +25,8 @@ __pycache__/
 
 # Local datasets and generated experiment outputs.
 data/
+models/
+results/
 outputs/
 runs/
 checkpoints/

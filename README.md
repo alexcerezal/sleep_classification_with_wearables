@@ -15,3 +15,24 @@ El objetivo del proyecto es entrenar y validar un modelo con accelerometria tria
 - Los datos se guardan en `data/` y no se versionan.
 - Los experimentos, checkpoints y salidas intermedias no se versionan.
 - La memoria LaTeX se trabaja en local y solo se sube el PDF compilado en `doc/main.pdf`.
+
+## Primera version sintética
+
+Esta rama incorpora una primera version del pipeline centrada solo en DREAMT a nivel conceptual, pero usando datos sinteticos para validar el flujo completo antes del preprocesado real:
+
+- `src/generate_synthetic_data.py`: genera un dataset tabular sintetico con epochs de 30 segundos.
+- `src/train_random_forest.py`: entrena y evalua un `RandomForestClassifier` con separacion por sujeto.
+- `src/explain_shap.py`: genera interpretabilidad global y por clase con SHAP.
+- `src/run_synthetic_pipeline.py`: ejecuta el pipeline completo.
+
+Dependencias:
+
+```bash
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Ejecucion:
+
+```bash
+.\.venv\Scripts\python.exe -m src.run_synthetic_pipeline
+```
