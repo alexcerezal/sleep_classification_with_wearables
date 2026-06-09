@@ -22,7 +22,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
-from src.config import (
+from src_sint.config import (
     CONFUSION_MATRIX_PATH,
     DATA_PATH,
     FEATURE_COLUMNS,

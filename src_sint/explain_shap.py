@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 
 from matplotlib import pyplot as plt
 
-from src.config import (
+from src_sint.config import (
     CLASS_NAMES,
     DATA_PATH,
     FEATURE_COLUMNS,
@@ -22,7 +22,7 @@ from src.config import (
     RESULTS_DIR,
     ensure_directories,
 )
-from src.train_random_forest import load_dataset, split_dataset
+from src_sint.train_random_forest import load_dataset, split_dataset
 
 
 def normalize_shap_values(shap_values: object, class_names: list[str]) -> dict[str, np.ndarray]:

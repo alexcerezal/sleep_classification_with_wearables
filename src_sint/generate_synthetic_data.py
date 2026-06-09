@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.config import (
+from src_sint.config import (
     CLASS_NAMES,
     DATA_PATH,
     EPOCHS_PER_SUBJECT,
