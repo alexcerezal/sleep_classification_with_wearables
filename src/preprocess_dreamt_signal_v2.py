@@ -82,6 +82,15 @@ ACC_LOWCUT = 3.0
 ACC_HIGHCUT = 10.0
 ACC_FILTER_ORDER = 3
 
+EDA_COLUMN = "EDA"
+
+# EDA
+FS_EDA = 4.0
+EDA_LOWPASS_CUTOFF = 0.7
+EDA_FILTER_ORDER = 3
+EDA_DETREND_WINDOW_SECONDS = 5
+EDA_REPEAT_FACTOR_TO_64HZ = 16
+
 # Método de outliers
 OUTLIER_METHOD = "iqr"  # opciones: "iqr" o "zscore"
 
@@ -570,6 +579,244 @@ def save_most_filtered_acc_plot(
     plt.savefig(output_path, dpi=300)
     plt.close()
     
+
+# =============================================================================
+# PREPROCESAMIENTO EDA
+# =============================================================================
+
+def butter_lowpass_filter(
+    signal: np.ndarray,
+    fs: float,
+    cutoff: float,
+    order: int,
+) -> np.ndarray:
+    """
+    Aplica un filtro Butterworth paso bajo.
+
+    En DREAMT_FE, la EDA se filtra a fs=4 Hz con frecuencia de corte 0.7 Hz.
+    """
+    nyquist = fs / 2.0
+
+    if cutoff <= 0:
+        raise ValueError("cutoff debe ser mayor que 0 Hz.")
+
+    if cutoff >= nyquist:
+        raise ValueError(
+            f"cutoff debe ser menor que Nyquist. "
+            f"fs={fs} Hz, Nyquist={nyquist} Hz."
+        )
+
+    sos = butter(
+        N=order,
+        Wn=cutoff,
+        btype="lowpass",
+        fs=fs,
+        output="sos",
+    )
+
+    return sosfiltfilt(sos, signal)
+
+
+def local_detrend_eda(
+    eda_4hz: np.ndarray,
+    fs: float,
+    window_seconds: int,
+) -> np.ndarray:
+    """
+    Aplica detrending local a la EDA en ventanas de 5 segundos.
+
+    Equivalente conceptual a DREAMT_FE:
+    - EDA a 4 Hz.
+    - Ventanas de 20 muestras.
+    - Ajuste lineal por ventana.
+    - Resta de la tendencia local.
+
+    Para el último segmento:
+    - Si tiene al menos media ventana, se ajusta una recta.
+    - Si es más corto, se resta la media.
+    """
+    window_size = int(fs * window_seconds)
+
+    if window_size <= 1:
+        raise ValueError("La ventana de detrending debe tener al menos 2 muestras.")
+
+    detrended_segments = []
+
+    num_complete_windows = len(eda_4hz) // window_size
+
+    x = np.arange(window_size)
+
+    for i in range(num_complete_windows):
+        start = i * window_size
+        end = start + window_size
+
+        segment = eda_4hz[start:end]
+
+        m, b = np.polyfit(x, segment, 1)
+        detrended_segment = segment - (m * x + b)
+
+        detrended_segments.append(detrended_segment)
+
+    remaining = eda_4hz[num_complete_windows * window_size:]
+
+    if len(remaining) > 0:
+        remaining_x = np.arange(len(remaining))
+
+        if len(remaining) >= window_size // 2:
+            m, b = np.polyfit(remaining_x, remaining, 1)
+            remaining_detrended = remaining - (m * remaining_x + b)
+        else:
+            remaining_detrended = remaining - np.mean(remaining)
+
+        detrended_segments.append(remaining_detrended)
+
+    if len(detrended_segments) == 0:
+        return eda_4hz - np.mean(eda_4hz)
+
+    return np.concatenate(detrended_segments)
+
+
+def preprocess_eda(df: pd.DataFrame) -> pd.Series:
+    """
+    Preprocesa EDA siguiendo la lógica de DREAMT_FE:
+
+    1. Interpola valores ausentes.
+    2. Reduce la señal desde el dataframe a 64 Hz hasta su frecuencia real de 4 Hz.
+    3. Aplica detrending local en ventanas de 5 segundos.
+    4. Aplica Butterworth paso bajo, orden 3, fc=0.7 Hz, fs=4 Hz.
+    5. Repite la señal 16 veces para devolverla a la longitud del dataframe.
+    """
+    original_length = len(df)
+
+    eda_clean = interpolate_missing_values(df[EDA_COLUMN])
+    eda_values = eda_clean.to_numpy(dtype=float)
+
+    # DREAMT_FE usa eda[1::16]. Esto asume dataframe agregado a 64 Hz
+    # y EDA real a 4 Hz.
+    eda_4hz = eda_values[1::EDA_REPEAT_FACTOR_TO_64HZ]
+
+    if len(eda_4hz) < 3:
+        raise ValueError(
+            "La señal EDA resultante a 4 Hz es demasiado corta para preprocesar."
+        )
+
+    eda_detrended = local_detrend_eda(
+        eda_4hz=eda_4hz,
+        fs=FS_EDA,
+        window_seconds=EDA_DETREND_WINDOW_SECONDS,
+    )
+
+    eda_filtered = butter_lowpass_filter(
+        signal=eda_detrended,
+        fs=FS_EDA,
+        cutoff=EDA_LOWPASS_CUTOFF,
+        order=EDA_FILTER_ORDER,
+    )
+
+    # Volver a longitud del dataframe agregado a 64 Hz.
+    eda_repeated = np.repeat(
+        eda_filtered,
+        EDA_REPEAT_FACTOR_TO_64HZ,
+    )
+
+    if len(eda_repeated) > original_length:
+        eda_repeated = eda_repeated[:original_length]
+
+    elif len(eda_repeated) < original_length:
+        pad_length = original_length - len(eda_repeated)
+        eda_repeated = np.pad(
+            eda_repeated,
+            pad_width=(pad_length, 0),
+            mode="mean",
+        )
+
+    return pd.Series(eda_repeated, index=df.index, name=EDA_COLUMN)
+
+
+def save_eda_comparison_plot(
+    original_df: pd.DataFrame,
+    processed_df: pd.DataFrame,
+    output_dir: Path,
+) -> None:
+    """
+    Guarda una gráfica comparando la EDA original y la EDA preprocesada.
+
+    Como el detrending elimina la tendencia local y la señal resultante puede
+    quedar centrada alrededor de 0, se generan dos paneles:
+
+    1. Comparación en escala real.
+    2. Comparación centrada y reescalada solo para visualización.
+    """
+    time_seconds = build_time_axis(original_df, fs=FS_BVP)
+
+    original_signal = pd.to_numeric(
+        original_df[EDA_COLUMN],
+        errors="coerce",
+    )
+    original_signal = interpolate_missing_values(original_signal)
+
+    processed_signal = pd.to_numeric(
+        processed_df[EDA_COLUMN],
+        errors="coerce",
+    )
+    processed_signal = interpolate_missing_values(processed_signal)
+
+    original_centered = original_signal - original_signal.mean()
+    processed_centered = processed_signal - processed_signal.mean()
+
+    original_std = original_centered.std()
+    processed_std = processed_centered.std()
+
+    if original_std != 0 and not np.isnan(original_std):
+        original_visual = original_centered / original_std
+    else:
+        original_visual = original_centered
+
+    if processed_std != 0 and not np.isnan(processed_std):
+        processed_visual = processed_centered / processed_std
+    else:
+        processed_visual = processed_centered
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+
+    axes[0].plot(
+        time_seconds,
+        original_signal,
+        label="EDA original",
+        alpha=0.8,
+    )
+    axes[0].plot(
+        time_seconds,
+        processed_signal,
+        label="EDA preprocesada",
+        alpha=0.8,
+    )
+    axes[0].set_ylabel("EDA")
+    axes[0].set_title("Comparación EDA en escala real")
+    axes[0].legend()
+
+    axes[1].plot(
+        time_seconds,
+        original_visual,
+        label="EDA original centrada y reescalada",
+        alpha=0.8,
+    )
+    axes[1].plot(
+        time_seconds,
+        processed_visual,
+        label="EDA preprocesada centrada y reescalada",
+        alpha=0.8,
+    )
+    axes[1].set_xlabel("Tiempo (s)")
+    axes[1].set_ylabel("Amplitud normalizada")
+    axes[1].set_title("Comparación EDA normalizada solo para visualización")
+    axes[1].legend()
+
+    plt.tight_layout()
+
+    output_path = output_dir / "comparacion_EDA_original_vs_preprocesada.png"
+    plt.savefig(output_path, dpi=300)
+    plt.close()
 # =============================================================================
 # MÉTRICAS DE CONTROL
 # =============================================================================
@@ -642,6 +889,16 @@ def build_preprocessing_report(
     report["ACC_most_filtered_axis"] = most_filtered_axis
     report["num_samples"] = len(original_df)
 
+    if EDA_COLUMN in original_df.columns:
+        report["EDA_original_nan"] = int(
+            pd.to_numeric(original_df[EDA_COLUMN], errors="coerce").isna().sum()
+        )
+        report["EDA_processed_nan"] = int(
+            pd.to_numeric(processed_df[EDA_COLUMN], errors="coerce").isna().sum()
+        )
+        report["EDA_processed_mean"] = float(processed_df[EDA_COLUMN].mean())
+        report["EDA_processed_std"] = float(processed_df[EDA_COLUMN].std())
+
     return pd.DataFrame([report])
 
 
@@ -660,7 +917,7 @@ def main() -> None:
     df = pd.read_csv(input_csv)
     original_df = df.copy()
 
-    required_columns = [BVP_COLUMN, HR_COLUMN, IBI_COLUMN, *ACC_COLUMNS]
+    required_columns = [BVP_COLUMN, HR_COLUMN, IBI_COLUMN, EDA_COLUMN, *ACC_COLUMNS]
 
     missing_columns = [
         column for column in required_columns
@@ -677,6 +934,7 @@ def main() -> None:
         df[f"{BVP_COLUMN}_raw"] = df[BVP_COLUMN]
         df[f"{HR_COLUMN}_raw"] = df[HR_COLUMN]
         df[f"{IBI_COLUMN}_raw"] = df[IBI_COLUMN]
+        df[f"{EDA_COLUMN}_raw"] = df[EDA_COLUMN]
 
         for axis_column in ACC_COLUMNS:
             df[f"{axis_column}_raw"] = df[axis_column]
@@ -691,6 +949,14 @@ def main() -> None:
         original_df=original_df,
         processed_df=df,
         most_filtered_axis=most_filtered_axis,
+        output_dir=output_dir,
+    )
+
+    df[EDA_COLUMN] = preprocess_eda(df)
+
+    save_eda_comparison_plot(
+        original_df=original_df,
+        processed_df=df,
         output_dir=output_dir,
     )
 
