@@ -22,6 +22,8 @@ Funcionalidad actual:
     3. Banda 3-10 Hz.
     4. Frecuencia de muestreo 32 Hz.
     5. Genera una gráfica original vs filtrada para el eje que más filtrado sufre.
+- Preprocesa EDA siguiendo la lógica de DREAMT_FE:
+    1.  
 - Guarda un nuevo CSV preprocesado.
 
 Dependencias:
@@ -43,7 +45,7 @@ import matplotlib.pyplot as plt
 # CONFIGURACIÓN DEL USUARIO
 # =============================================================================
 
-INPUT_CSV = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\prueba.csv")
+INPUT_CSV = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\S002.csv")
 OUTPUT_DIR = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\results\prepo")
 
 
@@ -102,6 +104,12 @@ ZSCORE_THRESHOLD = 3.0
 
 # Guardar columnas originales para trazabilidad
 KEEP_RAW_COLUMNS = False
+
+# Columna de etiqueta de sueño
+LABEL_COLUMN = "Sleep_Stage"
+
+# Etiquetas que se eliminan antes de preprocesar
+LABELS_TO_REMOVE_BEFORE_PREPROCESSING = ["P"]
 
 
 # =============================================================================
@@ -265,6 +273,56 @@ def build_time_axis(df: pd.DataFrame, fs: float) -> np.ndarray:
         return timestamps - timestamps[0]
 
     return np.arange(len(df)) / fs
+
+
+def remove_unwanted_labels_before_preprocessing(
+    df: pd.DataFrame,
+    label_column: str,
+    labels_to_remove: list[str],
+) -> tuple[pd.DataFrame, int]:
+    """
+    Elimina antes del preprocesamiento todas las filas cuya etiqueta esté en
+    labels_to_remove.
+
+    En DREAMT puede aparecer la etiqueta 'P', que no interesa para la
+    clasificación de etapas de sueño. Se elimina antes de filtrar/interpolar
+    para evitar que esas filas influyan en el preprocesamiento de las señales.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame original.
+    label_column : str
+        Nombre de la columna de etiqueta.
+    labels_to_remove : list[str]
+        Lista de etiquetas que se deben eliminar.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, int]
+        DataFrame sin las etiquetas eliminadas y número de filas eliminadas.
+    """
+    if label_column not in df.columns:
+        raise ValueError(
+            f"No se ha encontrado la columna de etiqueta '{label_column}'. "
+            f"Columnas disponibles: {list(df.columns)}"
+        )
+
+    original_num_rows = len(df)
+
+    labels_as_string = df[label_column].astype(str).str.strip()
+
+    keep_mask = ~labels_as_string.isin(labels_to_remove)
+
+    df_clean = df.loc[keep_mask].copy()
+
+    removed_rows = original_num_rows - len(df_clean)
+
+    # Reseteamos índice para que todos los filtros y gráficas trabajen con
+    # una señal continua tras eliminar las filas P.
+    df_clean = df_clean.reset_index(drop=True)
+
+    return df_clean, removed_rows
 
 # =============================================================================
 # PREPROCESAMIENTO BVP
@@ -845,6 +903,7 @@ def build_preprocessing_report(
     processed_df: pd.DataFrame,
     acc_filtering_scores: dict[str, float],
     most_filtered_axis: str,
+    removed_p_rows: int,
 ) -> pd.DataFrame:
     """
     Crea un pequeño informe con métricas básicas del preprocesamiento.
@@ -899,6 +958,8 @@ def build_preprocessing_report(
         report["EDA_processed_mean"] = float(processed_df[EDA_COLUMN].mean())
         report["EDA_processed_std"] = float(processed_df[EDA_COLUMN].std())
 
+    report["removed_P_rows_before_preprocessing"] = removed_p_rows
+
     return pd.DataFrame([report])
 
 
@@ -915,6 +976,13 @@ def main() -> None:
         raise FileNotFoundError(f"No existe el CSV de entrada: {input_csv}")
 
     df = pd.read_csv(input_csv)
+
+    df, removed_p_rows = remove_unwanted_labels_before_preprocessing(
+        df=df,
+        label_column=LABEL_COLUMN,
+        labels_to_remove=LABELS_TO_REMOVE_BEFORE_PREPROCESSING,
+    )
+
     original_df = df.copy()
 
     required_columns = [BVP_COLUMN, HR_COLUMN, IBI_COLUMN, EDA_COLUMN, *ACC_COLUMNS]
@@ -972,6 +1040,7 @@ def main() -> None:
         processed_df=df,
         acc_filtering_scores=acc_filtering_scores,
         most_filtered_axis=most_filtered_axis,
+        removed_p_rows=removed_p_rows,
     )
 
     report_df.to_csv(report_csv, index=False)

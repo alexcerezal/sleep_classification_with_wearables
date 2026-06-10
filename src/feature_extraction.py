@@ -37,7 +37,7 @@ import pandas as pd
 # CONFIGURACIÓN DEL USUARIO
 # =============================================================================
 
-INPUT_CSV = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\S002.csv"
+INPUT_CSV = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\S002_preprocessed.csv"
 OUTPUT_DIR = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\results\feature_extraction"
 
 # Si el CSV ya tiene una columna con el identificador del sujeto, pon aquí su nombre.
