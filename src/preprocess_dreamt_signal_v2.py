@@ -16,6 +16,12 @@ Funcionalidad actual:
     1. Fuerza rango fisiológico 0.3-2.0 s.
     2. Elimina outliers.
     3. Interpola valores eliminados.
+- Preprocesa acelerometría:
+    1. Filtra ACC_X, ACC_Y y ACC_Z con Butterworth pasabanda.
+    2. Orden 3.
+    3. Banda 3-10 Hz.
+    4. Frecuencia de muestreo 32 Hz.
+    5. Genera una gráfica original vs filtrada para el eje que más filtrado sufre.
 - Guarda un nuevo CSV preprocesado.
 
 Dependencias:
@@ -28,7 +34,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.signal import cheby2, sosfiltfilt
+from scipy.signal import cheby2, sosfiltfilt, butter
+import matplotlib.pyplot as plt
+
 
 
 # =============================================================================
@@ -42,6 +50,15 @@ OUTPUT_DIR = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_weara
 BVP_COLUMN = "BVP"
 HR_COLUMN = "HR"
 IBI_COLUMN = "IBI"
+
+# En algunos CSV las columnas pueden venir como "ACC X" en vez de "ACC_X".
+# Aquí puedes adaptar los nombres a tu CSV.
+ACC_COLUMNS = ["ACC_X", "ACC_Y", "ACC_Z"]
+
+# Si tu CSV usa espacios, cambia la línea anterior por:
+# ACC_COLUMNS = ["ACC X", "ACC Y", "ACC Z"]
+
+TIMESTAMP_COLUMN = "TIMESTAMP"
 
 FS_BVP = 64.0
 
@@ -58,6 +75,12 @@ HR_MAX = 220.0
 # Rango fisiológico IBI
 IBI_MIN = 0.30
 IBI_MAX = 2.00
+
+# ACC
+FS_ACC = 32.0
+ACC_LOWCUT = 3.0
+ACC_HIGHCUT = 10.0
+ACC_FILTER_ORDER = 3
 
 # Método de outliers
 OUTLIER_METHOD = "iqr"  # opciones: "iqr" o "zscore"
@@ -213,6 +236,27 @@ def zscore_normalize_per_subject(signal: pd.Series) -> pd.Series:
     return (signal - mean) / std
 
 
+def build_time_axis(df: pd.DataFrame, fs: float) -> np.ndarray:
+    """
+    Construye un eje temporal en segundos para las gráficas.
+
+    Si existe TIMESTAMP, lo usa y lo normaliza para empezar en 0.
+    Si no existe, crea un eje temporal artificial.
+    """
+    if TIMESTAMP_COLUMN in df.columns:
+        timestamps = pd.to_numeric(df[TIMESTAMP_COLUMN], errors="coerce")
+        timestamps = (
+            timestamps
+            .interpolate(method="linear", limit_direction="both")
+            .ffill()
+            .bfill()
+        )
+        timestamps = timestamps.to_numpy(dtype=float)
+
+        return timestamps - timestamps[0]
+
+    return np.arange(len(df)) / fs
+
 # =============================================================================
 # PREPROCESAMIENTO BVP
 # =============================================================================
@@ -340,6 +384,193 @@ def preprocess_ibi(df: pd.DataFrame) -> pd.Series:
 
 
 # =============================================================================
+# PREPROCESAMIENTO ACC
+# =============================================================================
+
+
+def butter_bandpass_filter(
+    signal: np.ndarray,
+    fs: float,
+    lowcut: float,
+    highcut: float,
+    order: int,
+) -> np.ndarray:
+    """
+    Aplica un filtro Butterworth pasabanda.
+    """
+    nyquist = fs / 2.0
+
+    if lowcut <= 0:
+        raise ValueError("lowcut debe ser mayor que 0 Hz.")
+
+    if highcut >= nyquist:
+        raise ValueError(
+            f"highcut debe ser menor que Nyquist. "
+            f"fs={fs} Hz, Nyquist={nyquist} Hz."
+        )
+
+    if lowcut >= highcut:
+        raise ValueError("lowcut debe ser menor que highcut.")
+
+    sos = butter(
+        N=order,
+        Wn=[lowcut, highcut],
+        btype="bandpass",
+        fs=fs,
+        output="sos",
+    )
+
+    return sosfiltfilt(sos, signal)
+
+
+def preprocess_single_acc_axis(df: pd.DataFrame, axis_column: str) -> pd.Series:
+    """
+    Preprocesa un eje de acelerometría:
+    - Interpolación de NaN.
+    - Filtro Butterworth pasabanda 3-10 Hz, orden 3, fs=32 Hz.
+    """
+    acc_clean = interpolate_missing_values(df[axis_column])
+
+    acc_filtered = butter_bandpass_filter(
+        signal=acc_clean.to_numpy(dtype=float),
+        fs=FS_ACC,
+        lowcut=ACC_LOWCUT,
+        highcut=ACC_HIGHCUT,
+        order=ACC_FILTER_ORDER,
+    )
+
+    return pd.Series(acc_filtered, index=df.index, name=axis_column)
+
+
+def preprocess_accelerometry(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, float], str]:
+    """
+    Preprocesa los tres ejes de acelerometría.
+
+    Returns
+    -------
+    df : pd.DataFrame
+        DataFrame con los ejes ACC sustituidos por los valores filtrados.
+    filtering_scores : dict[str, float]
+        MAE entre señal original y filtrada para cada eje.
+    most_filtered_axis : str
+        Eje con mayor MAE original-filtrada.
+    """
+    filtering_scores = {}
+
+    for axis_column in ACC_COLUMNS:
+        original_axis = pd.to_numeric(df[axis_column], errors="coerce")
+
+        filtered_axis = preprocess_single_acc_axis(
+            df=df,
+            axis_column=axis_column,
+        )
+
+        valid_mask = (
+            original_axis.notna()
+            & filtered_axis.notna()
+        )
+
+        mae_filtering = np.mean(
+            np.abs(
+                filtered_axis.loc[valid_mask].to_numpy(dtype=float)
+                - original_axis.loc[valid_mask].to_numpy(dtype=float)
+            )
+        )
+
+        filtering_scores[axis_column] = float(mae_filtering)
+
+        df[axis_column] = filtered_axis
+
+    most_filtered_axis = max(filtering_scores, key=filtering_scores.get)
+
+    return df, filtering_scores, most_filtered_axis
+
+
+def save_most_filtered_acc_plot(
+    original_df: pd.DataFrame,
+    processed_df: pd.DataFrame,
+    most_filtered_axis: str,
+    output_dir: Path,
+) -> None:
+    """
+    Guarda una gráfica comparando señal original y filtrada para el eje ACC
+    que más filtración ha sufrido.
+
+    Importante:
+    El filtro pasabanda Butterworth elimina la componente DC y centra la señal
+    filtrada alrededor de 0. Por eso, para que la comparación visual sea útil,
+    la gráfica no muestra directamente la escala absoluta original, sino una
+    versión centrada y reescalada de ambas señales.
+
+    El CSV sigue guardando la señal filtrada real, sin esta normalización visual.
+    """
+    time_seconds = build_time_axis(original_df, fs=FS_ACC)
+
+    original_signal = pd.to_numeric(
+        original_df[most_filtered_axis],
+        errors="coerce",
+    )
+    original_signal = interpolate_missing_values(original_signal)
+
+    filtered_signal = pd.to_numeric(
+        processed_df[most_filtered_axis],
+        errors="coerce",
+    )
+    filtered_signal = interpolate_missing_values(filtered_signal)
+
+    # -------------------------------------------------------------------------
+    # Normalización solo para visualización
+    # -------------------------------------------------------------------------
+    original_centered = original_signal - original_signal.mean()
+    filtered_centered = filtered_signal - filtered_signal.mean()
+
+    original_std = original_centered.std()
+    filtered_std = filtered_centered.std()
+
+    if original_std != 0 and not np.isnan(original_std):
+        original_plot = original_centered / original_std
+    else:
+        original_plot = original_centered
+
+    if filtered_std != 0 and not np.isnan(filtered_std):
+        filtered_plot = filtered_centered / filtered_std
+    else:
+        filtered_plot = filtered_centered
+
+    # -------------------------------------------------------------------------
+    # Gráfica comparativa
+    # -------------------------------------------------------------------------
+    plt.figure(figsize=(14, 5))
+
+    plt.plot(
+        time_seconds,
+        original_plot,
+        label=f"{most_filtered_axis} original centrada y reescalada",
+        alpha=0.75,
+    )
+
+    plt.plot(
+        time_seconds,
+        filtered_plot,
+        label=f"{most_filtered_axis} filtrada centrada y reescalada",
+        alpha=0.85,
+    )
+
+    plt.xlabel("Tiempo (s)")
+    plt.ylabel("Amplitud normalizada para visualización")
+    plt.title(
+        f"Comparación acelerometría: {most_filtered_axis} original vs filtrada"
+    )
+    plt.legend()
+    plt.tight_layout()
+
+    output_path = output_dir / "comparacion_acc_eje_mas_filtrado.png"
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+    
+# =============================================================================
 # MÉTRICAS DE CONTROL
 # =============================================================================
 
@@ -365,6 +596,8 @@ def count_invalid_range_values(
 def build_preprocessing_report(
     original_df: pd.DataFrame,
     processed_df: pd.DataFrame,
+    acc_filtering_scores: dict[str, float],
+    most_filtered_axis: str,
 ) -> pd.DataFrame:
     """
     Crea un pequeño informe con métricas básicas del preprocesamiento.
@@ -403,6 +636,10 @@ def build_preprocessing_report(
         report["IBI_processed_mean_seconds"] = float(processed_df[IBI_COLUMN].mean())
         report["IBI_processed_std_seconds"] = float(processed_df[IBI_COLUMN].std())
 
+    for axis_column, score in acc_filtering_scores.items():
+        report[f"{axis_column}_filtering_MAE"] = score
+
+    report["ACC_most_filtered_axis"] = most_filtered_axis
     report["num_samples"] = len(original_df)
 
     return pd.DataFrame([report])
@@ -423,7 +660,7 @@ def main() -> None:
     df = pd.read_csv(input_csv)
     original_df = df.copy()
 
-    required_columns = [BVP_COLUMN, HR_COLUMN, IBI_COLUMN]
+    required_columns = [BVP_COLUMN, HR_COLUMN, IBI_COLUMN, *ACC_COLUMNS]
 
     missing_columns = [
         column for column in required_columns
@@ -441,9 +678,21 @@ def main() -> None:
         df[f"{HR_COLUMN}_raw"] = df[HR_COLUMN]
         df[f"{IBI_COLUMN}_raw"] = df[IBI_COLUMN]
 
+        for axis_column in ACC_COLUMNS:
+            df[f"{axis_column}_raw"] = df[axis_column]
+
     df[BVP_COLUMN] = preprocess_bvp(df)
     df[HR_COLUMN] = preprocess_hr(df)
     df[IBI_COLUMN] = preprocess_ibi(df)
+
+    df, acc_filtering_scores, most_filtered_axis = preprocess_accelerometry(df)
+
+    save_most_filtered_acc_plot(
+        original_df=original_df,
+        processed_df=df,
+        most_filtered_axis=most_filtered_axis,
+        output_dir=output_dir,
+    )
 
     stem = input_csv.stem
 
@@ -455,6 +704,8 @@ def main() -> None:
     report_df = build_preprocessing_report(
         original_df=original_df,
         processed_df=df,
+        acc_filtering_scores=acc_filtering_scores,
+        most_filtered_axis=most_filtered_axis,
     )
 
     report_df.to_csv(report_csv, index=False)
@@ -462,6 +713,7 @@ def main() -> None:
     print("Preprocesamiento completado.")
     print(f"CSV preprocesado: {output_csv}")
     print(f"Informe:          {report_csv}")
+    print(f"Gráfica ACC:      {output_dir / 'comparacion_acc_eje_mas_filtrado.png'}")
     print()
     print("Resumen:")
     print(report_df.to_string(index=False))
