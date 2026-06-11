@@ -12,6 +12,28 @@ Salida:
     subject_id
     epoch_id
     etiqueta
+    Features ACC:
+    - ACC_X_trimmed_mean
+    - ACC_X_trimmed_max
+    - ACC_X_trimmed_IQR
+    - ACC_Y_trimmed_mean
+    - ACC_Y_trimmed_max
+    - ACC_Y_trimmed_IQR
+    - ACC_Z_trimmed_mean
+    - ACC_Z_trimmed_max
+    - ACC_Z_trimmed_IQR
+
+    - ACC_X_MAD_trimmed_mean
+    - ACC_X_MAD_trimmed_max
+    - ACC_X_MAD_trimmed_IQR
+    - ACC_Y_MAD_trimmed_mean
+    - ACC_Y_MAD_trimmed_max
+    - ACC_Y_MAD_trimmed_IQR
+    - ACC_Z_MAD_trimmed_mean
+    - ACC_Z_MAD_trimmed_max
+    - ACC_Z_MAD_trimmed_IQR
+
+    - ACC_INDEX
 
 Preprocesamiento previo esperado:
 - BVP ya filtrada.
@@ -58,6 +80,9 @@ FS = 64.0
 
 # Duración estándar de las épocas PSG.
 EPOCH_DURATION_SECONDS = 30
+
+# Columnas ACC.
+ACC_COLUMNS = ["ACC_X", "ACC_Y", "ACC_Z"]
 
 # Columnas de eventos respiratorios que se eliminan.
 RESPIRATORY_EVENT_COLUMNS = [
@@ -187,6 +212,235 @@ def get_epoch_label(labels: pd.Series):
     return mode_values.iloc[0]
 
 
+def to_clean_numpy(series: pd.Series) -> np.ndarray:
+    """
+    Convierte una serie a array numérico, interpolando posibles NaN.
+    """
+    numeric = pd.to_numeric(series, errors="coerce")
+
+    numeric = (
+        numeric
+        .interpolate(method="linear", limit_direction="both")
+        .ffill()
+        .bfill()
+    )
+
+    return numeric.to_numpy(dtype=float)
+
+
+# =============================================================================
+# FEATURES ACC SEGÚN DREAMT_FE
+# =============================================================================
+
+def acc_trimmed_summary(acc: np.ndarray) -> tuple[float, float, float]:
+    """
+    Calcula mean, max e IQR sobre la señal recortada entre cuantiles 10 y 90.
+
+    DREAMT_FE usa:
+        acc_filtered = acc[(acc > q10) & (acc < q90)]
+
+    Si el recorte deja la señal vacía, se devuelven:
+        mean(acc), max(acc), 0
+    """
+    acc = np.asarray(acc, dtype=float)
+    acc = acc[np.isfinite(acc)]
+
+    if len(acc) == 0:
+        return np.nan, np.nan, np.nan
+
+    q10 = np.quantile(acc, 0.10)
+    q90 = np.quantile(acc, 0.90)
+
+    acc_filtered = acc[(acc > q10) & (acc < q90)]
+
+    if len(acc_filtered) == 0:
+        return float(np.mean(acc)), float(np.max(acc)), 0.0
+
+    trimmed_mean = float(np.mean(acc_filtered))
+    trimmed_max = float(np.max(acc_filtered))
+
+    # Nota: DREAMT_FE calcula Q3 sobre acc_filtered y Q1 sobre acc.
+    # Aquí mantengo una versión coherente del IQR trimmed: Q3-Q1 sobre acc_filtered.
+    trimmed_iqr = float(
+        np.quantile(acc_filtered, 0.75)
+        - np.quantile(acc_filtered, 0.25)
+    )
+
+    return trimmed_mean, trimmed_max, trimmed_iqr
+
+
+def mad_trimmed_summary(
+    acc: np.ndarray,
+    segment_seconds: int = 30,
+) -> tuple[float, float, float]:
+    """
+    Calcula mean, max e IQR de la señal MAD.
+
+    En DREAMT_FE:
+    - Se divide la época de 30 segundos en 6 subventanas de 5 segundos.
+    - En cada subventana se calcula:
+        MAD = mean(abs(x - mean(x)))
+    - Después se calculan:
+        mean(MADs), max(MADs), IQR(MADs)
+
+    Se mantiene el chequeo trimmed inicial para detectar señales degeneradas.
+    """
+    acc = np.asarray(acc, dtype=float)
+    acc = acc[np.isfinite(acc)]
+
+    if len(acc) == 0:
+        return np.nan, np.nan, np.nan
+
+    q10 = np.quantile(acc, 0.10)
+    q90 = np.quantile(acc, 0.90)
+
+    acc_filtered = acc[(acc > q10) & (acc < q90)]
+
+    if len(acc_filtered) == 0:
+        return float(np.mean(acc)), float(np.max(acc)), 0.0
+
+    num_splits = int(segment_seconds / 5)
+
+    if num_splits <= 0:
+        raise ValueError("segment_seconds debe ser al menos 5.")
+
+    splits = np.array_split(acc, num_splits)
+
+    mads = np.array(
+        [
+            np.mean(np.abs(split - np.mean(split)))
+            for split in splits
+            if len(split) > 0
+        ],
+        dtype=float,
+    )
+
+    if len(mads) == 0:
+        return np.nan, np.nan, np.nan
+
+    mad_mean = float(np.mean(mads))
+    mad_max = float(np.max(mads))
+    mad_iqr = float(np.quantile(mads, 0.75) - np.quantile(mads, 0.25))
+
+    return mad_mean, mad_max, mad_iqr
+
+
+def calculate_acc_index(
+    acc_x: np.ndarray,
+    acc_y: np.ndarray,
+    acc_z: np.ndarray,
+    fs: float,
+) -> float:
+    """
+    Calcula ACC_INDEX siguiendo la idea de DREAMT_FE.
+
+    DREAMT_FE:
+    - Calcula magnitud triaxial:
+        acc = sqrt(x^2 + y^2 + z^2)
+    - Divide la época en bloques de 5 segundos.
+    - Calcula std de cada bloque.
+    - Suma las std de los 6 bloques de una época de 30 segundos.
+
+    Aquí se generaliza a la FS configurada.
+    """
+    acc_x = np.asarray(acc_x, dtype=float)
+    acc_y = np.asarray(acc_y, dtype=float)
+    acc_z = np.asarray(acc_z, dtype=float)
+
+    min_len = min(len(acc_x), len(acc_y), len(acc_z))
+
+    if min_len == 0:
+        return np.nan
+
+    acc_x = acc_x[:min_len]
+    acc_y = acc_y[:min_len]
+    acc_z = acc_z[:min_len]
+
+    acc_magnitude = np.sqrt(acc_x**2 + acc_y**2 + acc_z**2)
+
+    samples_per_5s = int(fs * 5)
+
+    if samples_per_5s <= 0:
+        raise ValueError("samples_per_5s debe ser mayor que 0.")
+
+    num_complete_periods = len(acc_magnitude) // samples_per_5s
+
+    if num_complete_periods == 0:
+        return float(np.std(acc_magnitude))
+
+    trimmed_length = num_complete_periods * samples_per_5s
+
+    reshaped_acc = acc_magnitude[:trimmed_length].reshape(
+        num_complete_periods,
+        samples_per_5s,
+    )
+
+    acc_stds = np.std(reshaped_acc, axis=1)
+
+    acc_index = float(np.sum(acc_stds))
+
+    return acc_index
+
+
+def extract_acc_features_from_epoch(
+    epoch_df: pd.DataFrame,
+) -> dict[str, float]:
+    """
+    Extrae features ACC de una época de 30 segundos.
+    """
+    missing_acc_columns = [
+        column for column in ACC_COLUMNS
+        if column not in epoch_df.columns
+    ]
+
+    if missing_acc_columns:
+        raise ValueError(
+            f"Faltan columnas ACC en el CSV: {missing_acc_columns}. "
+            f"Columnas disponibles: {list(epoch_df.columns)}"
+        )
+
+    acc_x = to_clean_numpy(epoch_df[ACC_COLUMNS[0]])
+    acc_y = to_clean_numpy(epoch_df[ACC_COLUMNS[1]])
+    acc_z = to_clean_numpy(epoch_df[ACC_COLUMNS[2]])
+
+    features = {}
+
+    axis_arrays = {
+        "ACC_X": acc_x,
+        "ACC_Y": acc_y,
+        "ACC_Z": acc_z,
+    }
+
+    for axis_name, axis_values in axis_arrays.items():
+        trimmed_mean, trimmed_max, trimmed_iqr = acc_trimmed_summary(axis_values)
+
+        features[f"{axis_name}_trimmed_mean"] = trimmed_mean
+        features[f"{axis_name}_trimmed_max"] = trimmed_max
+        features[f"{axis_name}_trimmed_IQR"] = trimmed_iqr
+
+    for axis_name, axis_values in axis_arrays.items():
+        mad_mean, mad_max, mad_iqr = mad_trimmed_summary(
+            axis_values,
+            segment_seconds=EPOCH_DURATION_SECONDS,
+        )
+
+        features[f"{axis_name}_MAD_trimmed_mean"] = mad_mean
+        features[f"{axis_name}_MAD_trimmed_max"] = mad_max
+        features[f"{axis_name}_MAD_trimmed_IQR"] = mad_iqr
+
+    features["ACC_INDEX"] = calculate_acc_index(
+        acc_x=acc_x,
+        acc_y=acc_y,
+        acc_z=acc_z,
+        fs=FS,
+    )
+
+    return features
+
+# =============================================================================
+# CONSTRUCCIÓN DEL DATAFRAME FINAL POR ÉPOCAS
+# =============================================================================
+
 def build_epoch_dataframe(
     df: pd.DataFrame,
     subject_id: str,
@@ -194,10 +448,11 @@ def build_epoch_dataframe(
     """
     Agrupa el dataframe en épocas de 30 segundos y construye la tabla final.
 
-    De momento, solo devuelve:
+    Devuelve:
     - subject_id
     - epoch_id
     - etiqueta
+    - features ACC
     """
     if LABEL_COLUMN not in df.columns:
         raise ValueError(
@@ -205,25 +460,49 @@ def build_epoch_dataframe(
             f"Columnas disponibles: {list(df.columns)}"
         )
 
-    grouped = df.groupby("epoch_id", sort=True)
+    rows = []
 
-    epoch_df = grouped[LABEL_COLUMN].apply(get_epoch_label).reset_index()
-
-    epoch_df = epoch_df.rename(
-        columns={
-            LABEL_COLUMN: "etiqueta",
+    for epoch_id, epoch_data in df.groupby("epoch_id", sort=True):
+        row = {
+            "subject_id": subject_id,
+            "epoch_id": int(epoch_id),
+            "etiqueta": get_epoch_label(epoch_data[LABEL_COLUMN]),
         }
-    )
 
-    epoch_df.insert(0, "subject_id", subject_id)
+        row.update(
+            extract_acc_features_from_epoch(epoch_data)
+        )
 
-    epoch_df = epoch_df[
-        [
-            "subject_id",
-            "epoch_id",
-            "etiqueta",
-        ]
+        rows.append(row)
+
+    epoch_df = pd.DataFrame(rows)
+
+    ordered_columns = [
+        "subject_id",
+        "epoch_id",
+        "etiqueta",
+        "ACC_X_trimmed_mean",
+        "ACC_X_trimmed_max",
+        "ACC_X_trimmed_IQR",
+        "ACC_Y_trimmed_mean",
+        "ACC_Y_trimmed_max",
+        "ACC_Y_trimmed_IQR",
+        "ACC_Z_trimmed_mean",
+        "ACC_Z_trimmed_max",
+        "ACC_Z_trimmed_IQR",
+        "ACC_X_MAD_trimmed_mean",
+        "ACC_X_MAD_trimmed_max",
+        "ACC_X_MAD_trimmed_IQR",
+        "ACC_Y_MAD_trimmed_mean",
+        "ACC_Y_MAD_trimmed_max",
+        "ACC_Y_MAD_trimmed_IQR",
+        "ACC_Z_MAD_trimmed_mean",
+        "ACC_Z_MAD_trimmed_max",
+        "ACC_Z_MAD_trimmed_IQR",
+        "ACC_INDEX",
     ]
+
+    epoch_df = epoch_df[ordered_columns]
 
     return epoch_df
 
@@ -234,11 +513,16 @@ def build_extraction_report(
     epoch_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Genera un pequeño informe de control.
+    Genera un informe de control.
     """
     dropped_columns = [
         column for column in RESPIRATORY_EVENT_COLUMNS
         if column in original_df.columns
+    ]
+
+    acc_feature_columns = [
+        column for column in epoch_df.columns
+        if column.startswith("ACC_")
     ]
 
     report = {
@@ -250,9 +534,14 @@ def build_extraction_report(
         "dropped_respiratory_columns": ", ".join(dropped_columns),
         "num_rows_after_dropping_columns": len(cleaned_df),
         "num_epochs_with_nan_label": int(epoch_df["etiqueta"].isna().sum()),
+        "num_acc_features": len(acc_feature_columns),
+        "num_epochs_with_any_nan_feature": int(
+            epoch_df[acc_feature_columns].isna().any(axis=1).sum()
+        ),
     }
 
     return pd.DataFrame([report])
+
 
 
 # =============================================================================
