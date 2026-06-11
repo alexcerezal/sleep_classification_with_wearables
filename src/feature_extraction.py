@@ -35,6 +35,16 @@ Salida:
 
     - ACC_INDEX
 
+    Features EDA:
+    - SCR_Height_mean
+    - SCR_Height_max
+    - SCR_Amplitude_mean
+    - SCR_Amplitude_max
+    - SCR_RiseTime_mean
+    - SCR_RiseTime_max
+    - SCR_RecoveryTime_mean
+    - SCR_RecoveryTime_max
+
 Preprocesamiento previo esperado:
 - BVP ya filtrada.
 - HR ya limpiada y normalizada.
@@ -53,6 +63,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import neurokit2 as nk
+import warnings
+from neurokit2.misc import NeuroKitWarning
 
 
 # =============================================================================
@@ -83,6 +96,15 @@ EPOCH_DURATION_SECONDS = 30
 
 # Columnas ACC.
 ACC_COLUMNS = ["ACC_X", "ACC_Y", "ACC_Z"]
+
+EDA_COLUMN = "EDA"
+
+# La EDA real de Empatica E4 está a 4 Hz.
+# Si el CSV está alineado a 64 Hz, la EDA suele estar repetida/interpolada.
+FS_EDA = 4.0
+
+# Factor entre 64 Hz y 4 Hz.
+EDA_REPEAT_FACTOR_TO_64HZ = 16
 
 # Columnas de eventos respiratorios que se eliminan.
 RESPIRATORY_EVENT_COLUMNS = [
@@ -229,7 +251,7 @@ def to_clean_numpy(series: pd.Series) -> np.ndarray:
 
 
 # =============================================================================
-# FEATURES ACC SEGÚN DREAMT_FE
+# FEATURES ACC 
 # =============================================================================
 
 def acc_trimmed_summary(acc: np.ndarray) -> tuple[float, float, float]:
@@ -438,6 +460,151 @@ def extract_acc_features_from_epoch(
     return features
 
 # =============================================================================
+# FEATURES EDA 
+# =============================================================================
+
+SCR_NAMES = [
+    "SCR_Height",
+    "SCR_Amplitude",
+    "SCR_RiseTime",
+    "SCR_RecoveryTime",
+]
+
+
+def reduce_eda_epoch_to_4hz(eda_epoch: np.ndarray) -> np.ndarray:
+    """
+    Reduce una época EDA desde el dataframe alineado a 64 Hz hasta 4 Hz.
+
+    DREAMT_FE trabaja con la EDA real de Empatica E4 a 4 Hz. Si el CSV está
+    alineado a 64 Hz, se toma una muestra cada 16.
+    """
+    eda_epoch = np.asarray(eda_epoch, dtype=float)
+
+    if len(eda_epoch) >= EDA_REPEAT_FACTOR_TO_64HZ:
+        eda_4hz = eda_epoch[1::EDA_REPEAT_FACTOR_TO_64HZ]
+    else:
+        eda_4hz = eda_epoch
+
+    eda_4hz = eda_4hz[np.isfinite(eda_4hz)]
+
+    return eda_4hz
+
+def extract_scr_dataframe_with_neurokit(eda_4hz: np.ndarray) -> pd.DataFrame:
+    """
+    Extrae las columnas SCR mediante NeuroKit2.
+
+    Como la EDA de Empatica está a 4 Hz, NeuroKit2 lanza un warning indicando
+    que omite su filtrado interno. En este pipeline no es problemático porque
+    la EDA ya ha sido preprocesada antes del feature extraction.
+    """
+    eda_4hz = np.asarray(eda_4hz, dtype=float)
+    eda_4hz = eda_4hz[np.isfinite(eda_4hz)]
+
+    if len(eda_4hz) < 10:
+        return pd.DataFrame(columns=SCR_NAMES)
+
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="EDA signal is sampled at very low frequency. Skipping filtering.",
+                category=NeuroKitWarning,
+            )
+
+            signals, info = nk.eda_process(
+                eda_signal=eda_4hz,
+                sampling_rate=FS_EDA,
+                method="neurokit",
+            )
+
+    except Exception:
+        return pd.DataFrame(columns=SCR_NAMES)
+
+    missing_scr_columns = [
+        column for column in SCR_NAMES
+        if column not in signals.columns
+    ]
+
+    if missing_scr_columns:
+        return pd.DataFrame(columns=SCR_NAMES)
+
+    scr_df = signals[SCR_NAMES].copy()
+
+    for column in SCR_NAMES:
+        scr_df[column] = pd.to_numeric(scr_df[column], errors="coerce")
+
+    return scr_df
+
+
+def summarize_scr_features(scr_df: pd.DataFrame) -> dict[str, float]:
+    """
+    Calcula mean y max para cada variable SCR.
+
+    Se sigue la lógica de DREAMT_FE:
+    para cada columna SCR se calculan estadísticas resumen por época.
+
+    Features generadas:
+        SCR_Height_mean
+        SCR_Height_max
+        SCR_Amplitude_mean
+        SCR_Amplitude_max
+        SCR_RiseTime_mean
+        SCR_RiseTime_max
+        SCR_RecoveryTime_mean
+        SCR_RecoveryTime_max
+    """
+    features = {}
+
+    for scr_name in SCR_NAMES:
+        if scr_name not in scr_df.columns:
+            features[f"{scr_name}_mean"] = np.nan
+            features[f"{scr_name}_max"] = np.nan
+            continue
+
+        values = pd.to_numeric(scr_df[scr_name], errors="coerce")
+        values = values.replace([np.inf, -np.inf], np.nan)
+
+        if values.dropna().empty:
+            features[f"{scr_name}_mean"] = np.nan
+            features[f"{scr_name}_max"] = np.nan
+        else:
+            features[f"{scr_name}_mean"] = float(values.mean(skipna=True))
+            features[f"{scr_name}_max"] = float(values.max(skipna=True))
+
+    return features
+
+
+def extract_eda_features_from_epoch(
+    epoch_df: pd.DataFrame,
+) -> dict[str, float]:
+    """
+    Extrae features EDA de una época de 30 segundos según DREAMT_FE.
+
+    Procedimiento:
+    1. Tomar la EDA de la época.
+    2. Reducirla a 4 Hz si viene alineada a 64 Hz.
+    3. Procesarla con NeuroKit2.
+    4. Extraer:
+        SCR_Height
+        SCR_Amplitude
+        SCR_RiseTime
+        SCR_RecoveryTime
+    5. Calcular mean y max de cada variable.
+    """
+    if EDA_COLUMN not in epoch_df.columns:
+        raise ValueError(
+            f"No se ha encontrado la columna EDA '{EDA_COLUMN}'. "
+            f"Columnas disponibles: {list(epoch_df.columns)}"
+        )
+
+    eda_epoch = to_clean_numpy(epoch_df[EDA_COLUMN])
+    eda_4hz = reduce_eda_epoch_to_4hz(eda_epoch)
+
+    scr_df = extract_scr_dataframe_with_neurokit(eda_4hz)
+
+    return summarize_scr_features(scr_df)
+
+# =============================================================================
 # CONSTRUCCIÓN DEL DATAFRAME FINAL POR ÉPOCAS
 # =============================================================================
 
@@ -473,6 +640,10 @@ def build_epoch_dataframe(
             extract_acc_features_from_epoch(epoch_data)
         )
 
+        row.update(
+            extract_eda_features_from_epoch(epoch_data)
+        )
+
         rows.append(row)
 
     epoch_df = pd.DataFrame(rows)
@@ -500,6 +671,14 @@ def build_epoch_dataframe(
         "ACC_Z_MAD_trimmed_max",
         "ACC_Z_MAD_trimmed_IQR",
         "ACC_INDEX",
+        "SCR_Height_mean",
+        "SCR_Height_max",
+        "SCR_Amplitude_mean",
+        "SCR_Amplitude_max",
+        "SCR_RiseTime_mean",
+        "SCR_RiseTime_max",
+        "SCR_RecoveryTime_mean",
+        "SCR_RecoveryTime_max",
     ]
 
     epoch_df = epoch_df[ordered_columns]
@@ -525,6 +704,11 @@ def build_extraction_report(
         if column.startswith("ACC_")
     ]
 
+    eda_feature_columns = [
+        column for column in epoch_df.columns
+        if column.startswith("SCR_")
+    ]
+
     report = {
         "num_original_rows": len(original_df),
         "num_epochs": len(epoch_df),
@@ -535,6 +719,10 @@ def build_extraction_report(
         "num_rows_after_dropping_columns": len(cleaned_df),
         "num_epochs_with_nan_label": int(epoch_df["etiqueta"].isna().sum()),
         "num_acc_features": len(acc_feature_columns),
+        "num_eda_features": len(eda_feature_columns),
+        "num_epochs_with_any_nan_eda_feature": int(
+            epoch_df[eda_feature_columns].isna().any(axis=1).sum()
+        ) if len(eda_feature_columns) > 0 else 0,
         "num_epochs_with_any_nan_feature": int(
             epoch_df[acc_feature_columns].isna().any(axis=1).sum()
         ),
