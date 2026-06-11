@@ -99,6 +99,8 @@ ACC_COLUMNS = ["ACC_X", "ACC_Y", "ACC_Z"]
 
 EDA_COLUMN = "EDA"
 
+TEMP_COLUMN = "TEMP"
+
 # La EDA real de Empatica E4 está a 4 Hz.
 # Si el CSV está alineado a 64 Hz, la EDA suele estar repetida/interpolada.
 FS_EDA = 4.0
@@ -604,6 +606,53 @@ def extract_eda_features_from_epoch(
 
     return summarize_scr_features(scr_df)
 
+
+# =============================================================================
+# FEATURES TEMP SEGÚN DREAMT_FE
+# =============================================================================
+
+def extract_temp_features_from_epoch(
+    epoch_df: pd.DataFrame,
+) -> dict[str, float]:
+    """
+    Extrae features de temperatura de una época de 30 segundos según DREAMT_FE.
+
+    Features:
+    - TEMP_mean
+    - TEMP_median
+    - TEMP_max
+    - TEMP_min
+    - TEMP_std
+
+    La señal TEMP ya debe venir preprocesada o limpia desde el CSV de entrada.
+    """
+    if TEMP_COLUMN not in epoch_df.columns:
+        raise ValueError(
+            f"No se ha encontrado la columna TEMP '{TEMP_COLUMN}'. "
+            f"Columnas disponibles: {list(epoch_df.columns)}"
+        )
+
+    temp_values = to_clean_numpy(epoch_df[TEMP_COLUMN])
+
+    temp_values = temp_values[np.isfinite(temp_values)]
+
+    if len(temp_values) == 0:
+        return {
+            "TEMP_mean": np.nan,
+            "TEMP_median": np.nan,
+            "TEMP_max": np.nan,
+            "TEMP_min": np.nan,
+            "TEMP_std": np.nan,
+        }
+
+    return {
+        "TEMP_mean": float(np.mean(temp_values)),
+        "TEMP_median": float(np.median(temp_values)),
+        "TEMP_max": float(np.max(temp_values)),
+        "TEMP_min": float(np.min(temp_values)),
+        "TEMP_std": float(np.std(temp_values)),
+    }
+
 # =============================================================================
 # CONSTRUCCIÓN DEL DATAFRAME FINAL POR ÉPOCAS
 # =============================================================================
@@ -644,6 +693,10 @@ def build_epoch_dataframe(
             extract_eda_features_from_epoch(epoch_data)
         )
 
+        row.update(
+            extract_temp_features_from_epoch(epoch_data)
+        )
+
         rows.append(row)
 
     epoch_df = pd.DataFrame(rows)
@@ -679,6 +732,11 @@ def build_epoch_dataframe(
         "SCR_RiseTime_max",
         "SCR_RecoveryTime_mean",
         "SCR_RecoveryTime_max",
+        "TEMP_mean",
+        "TEMP_median",
+        "TEMP_max",
+        "TEMP_min",
+        "TEMP_std",
     ]
 
     epoch_df = epoch_df[ordered_columns]
@@ -709,6 +767,11 @@ def build_extraction_report(
         if column.startswith("SCR_")
     ]
 
+    temp_feature_columns = [
+        column for column in epoch_df.columns
+        if column.startswith("TEMP_")
+    ]
+
     report = {
         "num_original_rows": len(original_df),
         "num_epochs": len(epoch_df),
@@ -723,6 +786,10 @@ def build_extraction_report(
         "num_epochs_with_any_nan_eda_feature": int(
             epoch_df[eda_feature_columns].isna().any(axis=1).sum()
         ) if len(eda_feature_columns) > 0 else 0,
+        "num_temp_features": len(temp_feature_columns),
+        "num_epochs_with_any_nan_temp_feature": int(
+            epoch_df[temp_feature_columns].isna().any(axis=1).sum()
+        ) if len(temp_feature_columns) > 0 else 0,
         "num_epochs_with_any_nan_feature": int(
             epoch_df[acc_feature_columns].isna().any(axis=1).sum()
         ),
