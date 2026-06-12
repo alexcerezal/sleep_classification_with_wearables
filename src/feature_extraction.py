@@ -12,6 +12,35 @@ Salida:
     subject_id
     epoch_id
     etiqueta
+
+    Features BVP:
+ 
+    -features estadísticas básicas:
+    ├── BVP_mean
+    ├── BVP_median
+    ├── BVP_std
+    ├── BVP_min 
+    ├── BVP_max
+    └── BVP_range
+
+    -features estadísticas propias:
+    ├── BVP_iqr
+    ├── BVP_mad
+    ├── BVP_rms
+    ├── BVP_skewness
+    └── BVP_kurtosis
+ 
+    - features HRV con NeuroKit2:
+    ├── HRV_SDNN
+    ├── HRV_RMSSD
+    ├── HRV_pNN50
+    ├── HRV_SD1
+    ├── HRV_SD2
+    ├── HRV_SD1SD2
+    ├── HRV_HFD
+    ├── HRV_KFD
+    └── HRV_SampEn
+
     Features ACC:
     - ACC_X_trimmed_mean
     - ACC_X_trimmed_max
@@ -66,6 +95,7 @@ import pandas as pd
 import neurokit2 as nk
 import warnings
 from neurokit2.misc import NeuroKitWarning
+from scipy.stats import skew, kurtosis
 
 
 # =============================================================================
@@ -93,6 +123,11 @@ FS = 64.0
 
 # Duración estándar de las épocas PSG.
 EPOCH_DURATION_SECONDS = 30
+
+BVP_COLUMN = "BVP"
+
+# BVP de Empatica E4 en DREAMT suele estar a 64 Hz.
+FS_BVP = 64.0
 
 # Columnas ACC.
 ACC_COLUMNS = ["ACC_X", "ACC_Y", "ACC_Z"]
@@ -251,6 +286,222 @@ def to_clean_numpy(series: pd.Series) -> np.ndarray:
 
     return numeric.to_numpy(dtype=float)
 
+
+# =============================================================================
+# FEATURES BVP / HRV
+# =============================================================================
+
+BVP_FEATURE_COLUMNS = [
+    "BVP_mean",
+    "BVP_median",
+    "BVP_std",
+    "BVP_min",
+    "BVP_max",
+    "BVP_range",
+    "BVP_iqr",
+    "BVP_mad",
+    "BVP_rms",
+    "BVP_skewness",
+    "BVP_kurtosis",
+    "HRV_SDNN",
+    "HRV_RMSSD",
+    "HRV_pNN50",
+    "HRV_SD1",
+    "HRV_SD2",
+    "HRV_SD1SD2",
+    "HRV_HFD",
+    "HRV_KFD",
+    "HRV_SampEn",
+]
+
+
+def extract_bvp_statistical_features(
+    bvp_values: np.ndarray,
+) -> dict[str, float]:
+    """
+    Extrae features estadísticas de BVP por época.
+
+    Incluye:
+    - Estadísticas básicas similares a DREAMT_FE:
+        mean, median, std, min, max, range
+    - Estadísticas añadidas propias:
+        iqr, mad, rms, skewness, kurtosis
+    """
+    bvp_values = np.asarray(bvp_values, dtype=float)
+    bvp_values = bvp_values[np.isfinite(bvp_values)]
+
+    if len(bvp_values) == 0:
+        return {
+            "BVP_mean": np.nan,
+            "BVP_median": np.nan,
+            "BVP_std": np.nan,
+            "BVP_min": np.nan,
+            "BVP_max": np.nan,
+            "BVP_range": np.nan,
+            "BVP_iqr": np.nan,
+            "BVP_mad": np.nan,
+            "BVP_rms": np.nan,
+            "BVP_skewness": np.nan,
+            "BVP_kurtosis": np.nan,
+        }
+
+    bvp_mean = np.mean(bvp_values)
+    bvp_median = np.median(bvp_values)
+    bvp_std = np.std(bvp_values)
+    bvp_min = np.min(bvp_values)
+    bvp_max = np.max(bvp_values)
+
+    q1 = np.quantile(bvp_values, 0.25)
+    q3 = np.quantile(bvp_values, 0.75)
+
+    return {
+        "BVP_mean": float(bvp_mean),
+        "BVP_median": float(bvp_median),
+        "BVP_std": float(bvp_std),
+        "BVP_min": float(bvp_min),
+        "BVP_max": float(bvp_max),
+        "BVP_range": float(bvp_max - bvp_min),
+        "BVP_iqr": float(q3 - q1),
+        "BVP_mad": float(np.mean(np.abs(bvp_values - bvp_mean))),
+        "BVP_rms": float(np.sqrt(np.mean(bvp_values**2))),
+        "BVP_skewness": float(skew(bvp_values, bias=False)) if len(bvp_values) > 2 else np.nan,
+        "BVP_kurtosis": float(kurtosis(bvp_values, bias=False)) if len(bvp_values) > 3 else np.nan,
+    }
+
+
+def extract_hrv_features_from_bvp_with_neurokit(
+    bvp_values: np.ndarray,
+    sampling_rate: float,
+) -> dict[str, float]:
+    """
+    Extrae features HRV desde BVP usando NeuroKit2.
+
+    Estrategia:
+    1. Limpiar la señal BVP de la época.
+    2. Detectar picos PPG/BVP con NeuroKit2.
+    3. Calcular métricas HRV temporales, no lineales y de Poincaré.
+    4. Devolver únicamente las métricas seleccionadas.
+
+    Features:
+    - HRV_SDNN
+    - HRV_RMSSD
+    - HRV_pNN50
+    - HRV_SD1
+    - HRV_SD2
+    - HRV_SD1SD2
+    - HRV_HFD
+    - HRV_KFD
+    - HRV_SampEn
+    """
+    empty_features = {
+        "HRV_SDNN": np.nan,
+        "HRV_RMSSD": np.nan,
+        "HRV_pNN50": np.nan,
+        "HRV_SD1": np.nan,
+        "HRV_SD2": np.nan,
+        "HRV_SD1SD2": np.nan,
+        "HRV_HFD": np.nan,
+        "HRV_KFD": np.nan,
+        "HRV_SampEn": np.nan,
+    }
+
+    bvp_values = np.asarray(bvp_values, dtype=float)
+    bvp_values = bvp_values[np.isfinite(bvp_values)]
+
+    if len(bvp_values) < int(5 * sampling_rate):
+        return empty_features
+
+    try:
+        # La BVP ya viene preprocesada, pero NeuroKit2 necesita una señal válida
+        # para detectar picos PPG.
+        ppg_signals, ppg_info = nk.ppg_process(
+            ppg_signal=bvp_values,
+            sampling_rate=sampling_rate,
+        )
+
+        peaks = ppg_info.get("PPG_Peaks", None)
+
+        if peaks is None or len(peaks) < 3:
+            return empty_features
+
+        hrv_time = nk.hrv_time(
+            peaks,
+            sampling_rate=sampling_rate,
+            show=False,
+        )
+
+        hrv_nonlinear = nk.hrv_nonlinear(
+            peaks,
+            sampling_rate=sampling_rate,
+            show=False,
+        )
+
+    except Exception:
+        return empty_features
+
+    def get_feature(source_df: pd.DataFrame, column_name: str) -> float:
+        """
+        Extrae una feature de un dataframe de NeuroKit2 de forma segura.
+        """
+        if column_name not in source_df.columns:
+            return np.nan
+
+        value = source_df[column_name].iloc[0]
+
+        if pd.isna(value) or not np.isfinite(value):
+            return np.nan
+
+        return float(value)
+
+    features = {
+        "HRV_SDNN": get_feature(hrv_time, "HRV_SDNN"),
+        "HRV_RMSSD": get_feature(hrv_time, "HRV_RMSSD"),
+        "HRV_pNN50": get_feature(hrv_time, "HRV_pNN50"),
+
+        "HRV_SD1": get_feature(hrv_nonlinear, "HRV_SD1"),
+        "HRV_SD2": get_feature(hrv_nonlinear, "HRV_SD2"),
+        "HRV_SD1SD2": get_feature(hrv_nonlinear, "HRV_SD1SD2"),
+
+        "HRV_HFD": get_feature(hrv_nonlinear, "HRV_HFD"),
+        "HRV_KFD": get_feature(hrv_nonlinear, "HRV_KFD"),
+        "HRV_SampEn": get_feature(hrv_nonlinear, "HRV_SampEn"),
+    }
+
+    return features
+
+
+def extract_bvp_features_from_epoch(
+    epoch_df: pd.DataFrame,
+) -> dict[str, float]:
+    """
+    Extrae todas las features BVP/HRV de una época de 30 segundos.
+
+    Combina:
+    - Estadísticas BVP.
+    - HRV calculada desde BVP mediante NeuroKit2.
+    """
+    if BVP_COLUMN not in epoch_df.columns:
+        raise ValueError(
+            f"No se ha encontrado la columna BVP '{BVP_COLUMN}'. "
+            f"Columnas disponibles: {list(epoch_df.columns)}"
+        )
+
+    bvp_values = to_clean_numpy(epoch_df[BVP_COLUMN])
+
+    features = {}
+
+    features.update(
+        extract_bvp_statistical_features(bvp_values)
+    )
+
+    features.update(
+        extract_hrv_features_from_bvp_with_neurokit(
+            bvp_values=bvp_values,
+            sampling_rate=FS_BVP,
+        )
+    )
+
+    return features
 
 # =============================================================================
 # FEATURES ACC 
@@ -686,6 +937,10 @@ def build_epoch_dataframe(
         }
 
         row.update(
+            extract_bvp_features_from_epoch(epoch_data)
+        )
+
+        row.update(
             extract_acc_features_from_epoch(epoch_data)
         )
 
@@ -705,6 +960,26 @@ def build_epoch_dataframe(
         "subject_id",
         "epoch_id",
         "etiqueta",
+        "BVP_mean",
+        "BVP_median",
+        "BVP_std",
+        "BVP_min",
+        "BVP_max",
+        "BVP_range",
+        "BVP_iqr",
+        "BVP_mad",
+        "BVP_rms",
+        "BVP_skewness",
+        "BVP_kurtosis",
+        "HRV_SDNN",
+        "HRV_RMSSD",
+        "HRV_pNN50",
+        "HRV_SD1",
+        "HRV_SD2",
+        "HRV_SD1SD2",
+        "HRV_HFD",
+        "HRV_KFD",
+        "HRV_SampEn",
         "ACC_X_trimmed_mean",
         "ACC_X_trimmed_max",
         "ACC_X_trimmed_IQR",
@@ -757,6 +1032,11 @@ def build_extraction_report(
         if column in original_df.columns
     ]
 
+    bvp_feature_columns = [
+        column for column in epoch_df.columns
+        if column.startswith("BVP_") or column.startswith("HRV_")
+    ]
+
     acc_feature_columns = [
         column for column in epoch_df.columns
         if column.startswith("ACC_")
@@ -781,6 +1061,10 @@ def build_extraction_report(
         "dropped_respiratory_columns": ", ".join(dropped_columns),
         "num_rows_after_dropping_columns": len(cleaned_df),
         "num_epochs_with_nan_label": int(epoch_df["etiqueta"].isna().sum()),
+        "num_bvp_features": len(bvp_feature_columns),
+        "num_epochs_with_any_nan_bvp_feature": int(
+            epoch_df[bvp_feature_columns].isna().any(axis=1).sum()
+        ) if len(bvp_feature_columns) > 0 else 0,
         "num_acc_features": len(acc_feature_columns),
         "num_eda_features": len(eda_feature_columns),
         "num_epochs_with_any_nan_eda_feature": int(
