@@ -126,6 +126,10 @@ EPOCH_DURATION_SECONDS = 30
 
 BVP_COLUMN = "BVP"
 
+HR_COLUMN = "HR"
+
+IBI_COLUMN = "IBI"
+
 # BVP de Empatica E4 en DREAMT suele estar a 64 Hz.
 FS_BVP = 64.0
 
@@ -504,6 +508,116 @@ def extract_bvp_features_from_epoch(
     return features
 
 # =============================================================================
+# FEATURES HR E IBI
+# =============================================================================
+
+HR_IBI_FEATURE_COLUMNS = [
+    "HR_mean",
+    "HR_median",
+    "HR_max",
+    "HR_min",
+    "HR_std",
+    "IBI_mean",
+    "IBI_median",
+    "IBI_max",
+    "IBI_min",
+    "IBI_std",
+]
+
+
+def extract_basic_statistical_features(
+    values: np.ndarray,
+    prefix: str,
+) -> dict[str, float]:
+    """
+    Extrae estadísticas básicas de una señal por época.
+
+    Features:
+    - mean
+    - median
+    - max
+    - min
+    - std
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+
+    if len(values) == 0:
+        return {
+            f"{prefix}_mean": np.nan,
+            f"{prefix}_median": np.nan,
+            f"{prefix}_max": np.nan,
+            f"{prefix}_min": np.nan,
+            f"{prefix}_std": np.nan,
+        }
+
+    return {
+        f"{prefix}_mean": float(np.mean(values)),
+        f"{prefix}_median": float(np.median(values)),
+        f"{prefix}_max": float(np.max(values)),
+        f"{prefix}_min": float(np.min(values)),
+        f"{prefix}_std": float(np.std(values)),
+    }
+
+
+def extract_hr_features_from_epoch(
+    epoch_df: pd.DataFrame,
+) -> dict[str, float]:
+    """
+    Extrae features de HR por época.
+
+    Features:
+    - HR_mean
+    - HR_median
+    - HR_max
+    - HR_min
+    - HR_std
+
+    Nota:
+    Si en el preprocesamiento normalizaste HR por sujeto, estas features se
+    calculan sobre HR normalizada, no sobre bpm originales.
+    """
+    if HR_COLUMN not in epoch_df.columns:
+        raise ValueError(
+            f"No se ha encontrado la columna HR '{HR_COLUMN}'. "
+            f"Columnas disponibles: {list(epoch_df.columns)}"
+        )
+
+    hr_values = to_clean_numpy(epoch_df[HR_COLUMN])
+
+    return extract_basic_statistical_features(
+        values=hr_values,
+        prefix="HR",
+    )
+
+
+def extract_ibi_features_from_epoch(
+    epoch_df: pd.DataFrame,
+) -> dict[str, float]:
+    """
+    Extrae features de IBI por época.
+
+    Features:
+    - IBI_mean
+    - IBI_median
+    - IBI_max
+    - IBI_min
+    - IBI_std
+    """
+    if IBI_COLUMN not in epoch_df.columns:
+        raise ValueError(
+            f"No se ha encontrado la columna IBI '{IBI_COLUMN}'. "
+            f"Columnas disponibles: {list(epoch_df.columns)}"
+        )
+
+    ibi_values = to_clean_numpy(epoch_df[IBI_COLUMN])
+
+    return extract_basic_statistical_features(
+        values=ibi_values,
+        prefix="IBI",
+    )
+
+# =============================================================================
 # FEATURES ACC 
 # =============================================================================
 
@@ -859,7 +973,7 @@ def extract_eda_features_from_epoch(
 
 
 # =============================================================================
-# FEATURES TEMP SEGÚN DREAMT_FE
+# FEATURES TEMP 
 # =============================================================================
 
 def extract_temp_features_from_epoch(
@@ -941,6 +1055,14 @@ def build_epoch_dataframe(
         )
 
         row.update(
+            extract_hr_features_from_epoch(epoch_data)
+        )
+
+        row.update(
+            extract_ibi_features_from_epoch(epoch_data)
+        )
+
+        row.update(
             extract_acc_features_from_epoch(epoch_data)
         )
 
@@ -960,6 +1082,7 @@ def build_epoch_dataframe(
         "subject_id",
         "epoch_id",
         "etiqueta",
+
         "BVP_mean",
         "BVP_median",
         "BVP_std",
@@ -980,6 +1103,19 @@ def build_epoch_dataframe(
         "HRV_HFD",
         "HRV_KFD",
         "HRV_SampEn",
+
+        "HR_mean",
+        "HR_median",
+        "HR_max",
+        "HR_min",
+        "HR_std",
+
+        "IBI_mean",
+        "IBI_median",
+        "IBI_max",
+        "IBI_min",
+        "IBI_std",
+
         "ACC_X_trimmed_mean",
         "ACC_X_trimmed_max",
         "ACC_X_trimmed_IQR",
@@ -999,6 +1135,7 @@ def build_epoch_dataframe(
         "ACC_Z_MAD_trimmed_max",
         "ACC_Z_MAD_trimmed_IQR",
         "ACC_INDEX",
+
         "SCR_Height_mean",
         "SCR_Height_max",
         "SCR_Amplitude_mean",
@@ -1007,6 +1144,7 @@ def build_epoch_dataframe(
         "SCR_RiseTime_max",
         "SCR_RecoveryTime_mean",
         "SCR_RecoveryTime_max",
+
         "TEMP_mean",
         "TEMP_median",
         "TEMP_max",
@@ -1037,6 +1175,11 @@ def build_extraction_report(
         if column.startswith("BVP_") or column.startswith("HRV_")
     ]
 
+    hr_ibi_feature_columns = [
+        column for column in epoch_df.columns
+        if column.startswith("HR_") or column.startswith("IBI_")
+    ]
+
     acc_feature_columns = [
         column for column in epoch_df.columns
         if column.startswith("ACC_")
@@ -1065,6 +1208,10 @@ def build_extraction_report(
         "num_epochs_with_any_nan_bvp_feature": int(
             epoch_df[bvp_feature_columns].isna().any(axis=1).sum()
         ) if len(bvp_feature_columns) > 0 else 0,
+        "num_hr_ibi_features": len(hr_ibi_feature_columns),
+        "num_epochs_with_any_nan_hr_ibi_feature": int(
+            epoch_df[hr_ibi_feature_columns].isna().any(axis=1).sum()
+        ) if len(hr_ibi_feature_columns) > 0 else 0,
         "num_acc_features": len(acc_feature_columns),
         "num_eda_features": len(eda_feature_columns),
         "num_epochs_with_any_nan_eda_feature": int(
