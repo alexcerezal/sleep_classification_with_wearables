@@ -41,6 +41,9 @@ Salida:
     ├── HRV_KFD
     └── HRV_SampEn
 
+    BVP_Hjorth_Mobility
+    BVP_Hjorth_Complexity
+
     Features ACC:
     - ACC_X_trimmed_mean
     - ACC_X_trimmed_max
@@ -307,6 +310,8 @@ BVP_FEATURE_COLUMNS = [
     "BVP_rms",
     "BVP_skewness",
     "BVP_kurtosis",
+    "BVP_Hjorth_Mobility",
+    "BVP_Hjorth_Complexity"
     "HRV_SDNN",
     "HRV_RMSSD",
     "HRV_pNN50",
@@ -317,6 +322,53 @@ BVP_FEATURE_COLUMNS = [
     "HRV_KFD",
     "HRV_SampEn",
 ]
+
+
+def calculate_hjorth_mobility_complexity(
+    signal: np.ndarray,
+) -> tuple[float, float]:
+    """
+    Calcula movilidad y complejidad Hjorth de una señal.
+
+    Definiciones:
+    - Mobility = sqrt(var(dx) / var(x))
+    - Complexity = Mobility(dx) / Mobility(x)
+
+    Donde:
+    - x es la señal original.
+    - dx es la primera derivada discreta.
+    - ddx es la segunda derivada discreta.
+
+    Returns
+    -------
+    tuple[float, float]
+        BVP_Hjorth_Mobility, BVP_Hjorth_Complexity
+    """
+    signal = np.asarray(signal, dtype=float)
+    signal = signal[np.isfinite(signal)]
+
+    if len(signal) < 3:
+        return np.nan, np.nan
+
+    first_derivative = np.diff(signal)
+    second_derivative = np.diff(first_derivative)
+
+    var_signal = np.var(signal)
+    var_first_derivative = np.var(first_derivative)
+    var_second_derivative = np.var(second_derivative)
+
+    if var_signal == 0 or var_first_derivative == 0:
+        return np.nan, np.nan
+
+    mobility = np.sqrt(var_first_derivative / var_signal)
+
+    mobility_derivative = np.sqrt(
+        var_second_derivative / var_first_derivative
+    )
+
+    complexity = mobility_derivative / mobility
+
+    return float(mobility), float(complexity)
 
 
 def extract_bvp_statistical_features(
@@ -358,6 +410,10 @@ def extract_bvp_statistical_features(
     q1 = np.quantile(bvp_values, 0.25)
     q3 = np.quantile(bvp_values, 0.75)
 
+    hjorth_mobility, hjorth_complexity = calculate_hjorth_mobility_complexity(
+        bvp_values
+    )
+
     return {
         "BVP_mean": float(bvp_mean),
         "BVP_median": float(bvp_median),
@@ -370,6 +426,8 @@ def extract_bvp_statistical_features(
         "BVP_rms": float(np.sqrt(np.mean(bvp_values**2))),
         "BVP_skewness": float(skew(bvp_values, bias=False)) if len(bvp_values) > 2 else np.nan,
         "BVP_kurtosis": float(kurtosis(bvp_values, bias=False)) if len(bvp_values) > 3 else np.nan,
+        "BVP_Hjorth_Mobility": hjorth_mobility,
+        "BVP_Hjorth_Complexity": hjorth_complexity,
     }
 
 
@@ -1094,6 +1152,8 @@ def build_epoch_dataframe(
         "BVP_rms",
         "BVP_skewness",
         "BVP_kurtosis",
+        "BVP_Hjorth_Mobility",
+        "BVP_Hjorth_Complexity",
         "HRV_SDNN",
         "HRV_RMSSD",
         "HRV_pNN50",
