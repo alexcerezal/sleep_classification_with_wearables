@@ -93,6 +93,11 @@ EDA_FILTER_ORDER = 3
 EDA_DETREND_WINDOW_SECONDS = 5
 EDA_REPEAT_FACTOR_TO_64HZ = 16
 
+#TEMP
+TEMP_COLUMN = "TEMP"
+TEMP_MIN = 31.0
+TEMP_MAX = 40.0
+
 # Método de outliers
 OUTLIER_METHOD = "iqr"  # opciones: "iqr" o "zscore"
 
@@ -875,6 +880,37 @@ def save_eda_comparison_plot(
     output_path = output_dir / "comparacion_EDA_original_vs_preprocesada.png"
     plt.savefig(output_path, dpi=300)
     plt.close()
+
+
+# =============================================================================
+# PREPROCESAMIENTO TEMP
+# =============================================================================
+
+def preprocess_temp(df: pd.DataFrame) -> pd.Series:
+    """
+    Preprocesa temperatura:
+    - Fuerza rango 31-40ºC.
+    - Elimina outliers.
+    - Interpola valores eliminados.
+    - Normaliza por sujeto mediante z-score.
+    """
+    temp = apply_valid_range(
+        signal=df[TEMP_COLUMN],
+        min_value=TEMP_MIN,
+        max_value=TEMP_MAX,
+    )
+
+    temp = remove_outliers(
+        signal=temp,
+        method=OUTLIER_METHOD,
+        iqr_factor=IQR_FACTOR,
+        zscore_threshold=ZSCORE_THRESHOLD,
+    )
+
+    temp = interpolate_missing_values(temp)
+
+    return pd.Series(temp, index=df.index, name=TEMP_COLUMN)
+
 # =============================================================================
 # MÉTRICAS DE CONTROL
 # =============================================================================
@@ -958,6 +994,18 @@ def build_preprocessing_report(
         report["EDA_processed_mean"] = float(processed_df[EDA_COLUMN].mean())
         report["EDA_processed_std"] = float(processed_df[EDA_COLUMN].std())
 
+    if TEMP_COLUMN in original_df.columns:
+        report["TEMP_original_invalid_or_nan"] = count_invalid_range_values(
+            original_df[TEMP_COLUMN],
+            TEMP_MIN,
+            TEMP_MAX,
+        )
+        report["TEMP_processed_nan"] = int(
+            pd.to_numeric(processed_df[TEMP_COLUMN], errors="coerce").isna().sum()
+        )
+        report["TEMP_processed_mean"] = float(processed_df[TEMP_COLUMN].mean())
+        report["TEMP_processed_std"] = float(processed_df[TEMP_COLUMN].std())
+
     report["removed_P_rows_before_preprocessing"] = removed_p_rows
 
     return pd.DataFrame([report])
@@ -1013,20 +1061,22 @@ def main() -> None:
 
     df, acc_filtering_scores, most_filtered_axis = preprocess_accelerometry(df)
 
-    save_most_filtered_acc_plot(
+    """save_most_filtered_acc_plot(
         original_df=original_df,
         processed_df=df,
         most_filtered_axis=most_filtered_axis,
         output_dir=output_dir,
-    )
+    )"""
 
     df[EDA_COLUMN] = preprocess_eda(df)
 
-    save_eda_comparison_plot(
+    """save_eda_comparison_plot(
         original_df=original_df,
         processed_df=df,
         output_dir=output_dir,
-    )
+    )"""
+
+    df[TEMP_COLUMN] = preprocess_temp(df)
 
     stem = input_csv.stem
 
@@ -1048,7 +1098,7 @@ def main() -> None:
     print("Preprocesamiento completado.")
     print(f"CSV preprocesado: {output_csv}")
     print(f"Informe:          {report_csv}")
-    print(f"Gráfica ACC:      {output_dir / 'comparacion_acc_eje_mas_filtrado.png'}")
+    #print(f"Gráfica ACC:      {output_dir / 'comparacion_acc_eje_mas_filtrado.png'}")
     print()
     print("Resumen:")
     print(report_df.to_string(index=False))
