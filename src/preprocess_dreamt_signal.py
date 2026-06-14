@@ -45,9 +45,11 @@ import matplotlib.pyplot as plt
 # CONFIGURACIÓN DEL USUARIO
 # =============================================================================
 
-INPUT_CSV = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\S002.csv")
-OUTPUT_DIR = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\results\prepo")
+INPUT_DIR = r"C:\Proyectos_compartidos\TFG\datos\dreamt-dataset-for-real-time-sleep-stage-estimation-using-multisensor-wearable-technology-2.2.0\dreamt-dataset-for-real-time-sleep-stage-estimation-using-multisensor-wearable-technology-2.2.0\data_64Hz"
+OUTPUT_DIR = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\preprocesados"
 
+# Si quieres buscar CSV también dentro de subcarpetas, pon True.
+RECURSIVE_SEARCH = False
 
 BVP_COLUMN = "BVP"
 HR_COLUMN = "HR"
@@ -114,12 +116,45 @@ KEEP_RAW_COLUMNS = False
 LABEL_COLUMN = "Sleep_Stage"
 
 # Etiquetas que se eliminan antes de preprocesar
-LABELS_TO_REMOVE_BEFORE_PREPROCESSING = ["P"]
+LABELS_TO_REMOVE_BEFORE_PREPROCESSING = ["P", "Missing"]
 
 
 # =============================================================================
 # FUNCIONES GENERALES
 # =============================================================================
+
+def find_csv_files(input_dir: Path, recursive: bool = False) -> list[Path]:
+    """
+    Busca todos los archivos CSV dentro de una carpeta.
+
+    Parameters
+    ----------
+    input_dir : Path
+        Carpeta con los CSV crudos.
+    recursive : bool
+        Si es True, busca también dentro de subcarpetas.
+
+    Returns
+    -------
+    list[Path]
+        Lista ordenada de rutas a CSV.
+    """
+    if not input_dir.exists():
+        raise FileNotFoundError(f"No existe la carpeta de entrada: {input_dir}")
+
+    if not input_dir.is_dir():
+        raise NotADirectoryError(f"La ruta no es una carpeta: {input_dir}")
+
+    pattern = "**/*.csv" if recursive else "*.csv"
+
+    csv_files = sorted(input_dir.glob(pattern))
+
+    if len(csv_files) == 0:
+        raise FileNotFoundError(
+            f"No se ha encontrado ningún archivo CSV en: {input_dir}"
+        )
+
+    return csv_files
 
 def interpolate_missing_values(signal: pd.Series) -> pd.Series:
     """
@@ -1015,13 +1050,36 @@ def build_preprocessing_report(
 # SCRIPT PRINCIPAL
 # =============================================================================
 
-def main() -> None:
-    input_csv = Path(INPUT_CSV)
-    output_dir = Path(OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
+def preprocess_single_csv(
+    input_csv: Path,
+    output_dir: Path,
+) -> pd.DataFrame:
+    """
+    Preprocesa un único CSV crudo de DREAMT.
 
-    if not input_csv.exists():
-        raise FileNotFoundError(f"No existe el CSV de entrada: {input_csv}")
+    Guarda:
+    - CSV preprocesado.
+    - Informe de preprocesamiento.
+    - Gráficas en una subcarpeta propia del archivo.
+
+    Parameters
+    ----------
+    input_csv : Path
+        Ruta al CSV crudo.
+    output_dir : Path
+        Carpeta general de salida.
+
+    Returns
+    -------
+    pd.DataFrame
+        Informe de preprocesamiento del archivo.
+    """
+    print(f"Procesando: {input_csv.name}")
+
+    stem = input_csv.stem
+
+    output_csv = output_dir / f"{stem}_preprocessed.csv"
+    report_csv = output_dir / f"{stem}_preprocessing_report.csv"
 
     df = pd.read_csv(input_csv)
 
@@ -1033,7 +1091,14 @@ def main() -> None:
 
     original_df = df.copy()
 
-    required_columns = [BVP_COLUMN, HR_COLUMN, IBI_COLUMN, EDA_COLUMN, *ACC_COLUMNS]
+    required_columns = [
+        BVP_COLUMN,
+        HR_COLUMN,
+        IBI_COLUMN,
+        EDA_COLUMN,
+        *ACC_COLUMNS,
+        TEMP_COLUMN,
+    ]
 
     missing_columns = [
         column for column in required_columns
@@ -1042,7 +1107,7 @@ def main() -> None:
 
     if missing_columns:
         raise ValueError(
-            f"Faltan columnas necesarias en el CSV: {missing_columns}. "
+            f"Faltan columnas necesarias en {input_csv.name}: {missing_columns}. "
             f"Columnas disponibles: {list(df.columns)}"
         )
 
@@ -1051,40 +1116,46 @@ def main() -> None:
         df[f"{HR_COLUMN}_raw"] = df[HR_COLUMN]
         df[f"{IBI_COLUMN}_raw"] = df[IBI_COLUMN]
         df[f"{EDA_COLUMN}_raw"] = df[EDA_COLUMN]
+        df[f"{TEMP_COLUMN}_raw"] = df[TEMP_COLUMN]
 
         for axis_column in ACC_COLUMNS:
             df[f"{axis_column}_raw"] = df[axis_column]
 
+    # -------------------------------------------------------------------------
+    # Preprocesamiento de señales
+    # -------------------------------------------------------------------------
     df[BVP_COLUMN] = preprocess_bvp(df)
     df[HR_COLUMN] = preprocess_hr(df)
     df[IBI_COLUMN] = preprocess_ibi(df)
+    df[EDA_COLUMN] = preprocess_eda(df)
+    df[TEMP_COLUMN] = preprocess_temp(df)
 
     df, acc_filtering_scores, most_filtered_axis = preprocess_accelerometry(df)
 
+    # -------------------------------------------------------------------------
+    # Gráficas
+    # -------------------------------------------------------------------------
     """save_most_filtered_acc_plot(
         original_df=original_df,
         processed_df=df,
         most_filtered_axis=most_filtered_axis,
-        output_dir=output_dir,
-    )"""
+        output_dir=plots_dir,
+    )
 
-    df[EDA_COLUMN] = preprocess_eda(df)
-
-    """save_eda_comparison_plot(
+    save_eda_comparison_plot(
         original_df=original_df,
         processed_df=df,
-        output_dir=output_dir,
+        output_dir=plots_dir,
     )"""
 
-    df[TEMP_COLUMN] = preprocess_temp(df)
-
-    stem = input_csv.stem
-
-    output_csv = output_dir / f"{stem}_preprocessed.csv"
-    report_csv = output_dir / f"{stem}_preprocessing_report.csv"
-
+    # -------------------------------------------------------------------------
+    # Guardado CSV preprocesado
+    # -------------------------------------------------------------------------
     df.to_csv(output_csv, index=False)
 
+    # -------------------------------------------------------------------------
+    # Informe
+    # -------------------------------------------------------------------------
     report_df = build_preprocessing_report(
         original_df=original_df,
         processed_df=df,
@@ -1093,15 +1164,85 @@ def main() -> None:
         removed_p_rows=removed_p_rows,
     )
 
+    report_df.insert(0, "source_file", input_csv.name)
+    report_df.insert(1, "output_file", output_csv.name)
+
     report_df.to_csv(report_csv, index=False)
 
-    print("Preprocesamiento completado.")
+    print(f"OK: {input_csv.name}")
     print(f"CSV preprocesado: {output_csv}")
     print(f"Informe:          {report_csv}")
-    #print(f"Gráfica ACC:      {output_dir / 'comparacion_acc_eje_mas_filtrado.png'}")
+    #print(f"Gráficas:         {plots_dir}")
     print()
-    print("Resumen:")
-    print(report_df.to_string(index=False))
+
+    return report_df
+
+
+def main() -> None:
+    input_dir = Path(INPUT_DIR)
+    output_dir = Path(OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_files = find_csv_files(
+        input_dir=input_dir,
+        recursive=RECURSIVE_SEARCH,
+    )
+
+    print(f"CSV encontrados: {len(csv_files)}")
+    print()
+
+    all_reports = []
+    failed_files = []
+
+    for csv_file in csv_files:
+        try:
+            report_df = preprocess_single_csv(
+                input_csv=csv_file,
+                output_dir=output_dir,
+            )
+
+            all_reports.append(report_df)
+
+        except Exception as error:
+            failed_files.append(
+                {
+                    "source_file": csv_file.name,
+                    "error": str(error),
+                }
+            )
+
+            print(f"ERROR procesando {csv_file.name}: {error}")
+            print()
+
+    # -------------------------------------------------------------------------
+    # Informe global
+    # -------------------------------------------------------------------------
+    if len(all_reports) > 0:
+        global_report_df = pd.concat(
+            all_reports,
+            axis=0,
+            ignore_index=True,
+        )
+
+        global_report_csv = output_dir / "global_preprocessing_report.csv"
+        global_report_df.to_csv(global_report_csv, index=False)
+
+    if len(failed_files) > 0:
+        failed_df = pd.DataFrame(failed_files)
+        failed_csv = output_dir / "failed_preprocessing_files.csv"
+        failed_df.to_csv(failed_csv, index=False)
+
+    print("Preprocesamiento por carpeta completado.")
+    print()
+    print(f"Archivos encontrados: {len(csv_files)}")
+    print(f"Archivos procesados correctamente: {len(all_reports)}")
+    print(f"Archivos con error: {len(failed_files)}")
+
+    if len(all_reports) > 0:
+        print(f"Informe global: {global_report_csv}")
+
+    if len(failed_files) > 0:
+        print(f"Errores guardados en: {failed_csv}")
 
 
 if __name__ == "__main__":
