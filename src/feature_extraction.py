@@ -105,8 +105,13 @@ from scipy.stats import skew, kurtosis
 # CONFIGURACIÓN DEL USUARIO
 # =============================================================================
 
-INPUT_CSV = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\S002_preprocessed.csv"
-OUTPUT_DIR = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\results\feature_extraction"
+INPUT_DIR = r"C:\ruta\a\tu\carpeta_con_csv_preprocesados"
+OUTPUT_DIR = r"C:\ruta\a\tu\carpeta_de_salida"
+
+OUTPUT_FILENAME = "dreamt_epoch_features.csv"
+
+# Si quieres buscar también en subcarpetas, pon True.
+RECURSIVE_SEARCH = False
 
 # Si el CSV ya tiene una columna con el identificador del sujeto, pon aquí su nombre.
 # Si no existe, se usará el nombre del archivo como subject_id.
@@ -162,6 +167,39 @@ RESPIRATORY_EVENT_COLUMNS = [
 # =============================================================================
 # FUNCIONES AUXILIARES
 # =============================================================================
+
+def find_csv_files(input_dir: Path, recursive: bool = False) -> list[Path]:
+    """
+    Busca todos los CSV dentro de una carpeta.
+
+    Parameters
+    ----------
+    input_dir : Path
+        Carpeta donde están los CSV preprocesados.
+    recursive : bool
+        Si es True, busca también en subcarpetas.
+
+    Returns
+    -------
+    list[Path]
+        Lista ordenada de archivos CSV.
+    """
+    if not input_dir.exists():
+        raise FileNotFoundError(f"No existe la carpeta de entrada: {input_dir}")
+
+    if not input_dir.is_dir():
+        raise NotADirectoryError(f"La ruta de entrada no es una carpeta: {input_dir}")
+
+    pattern = "**/*.csv" if recursive else "*.csv"
+
+    csv_files = sorted(input_dir.glob(pattern))
+
+    if len(csv_files) == 0:
+        raise FileNotFoundError(
+            f"No se ha encontrado ningún CSV en la carpeta: {input_dir}"
+        )
+
+    return csv_files
 
 def get_subject_id(df: pd.DataFrame, input_csv: Path) -> str:
     """
@@ -276,6 +314,91 @@ def get_epoch_label(labels: pd.Series):
         return np.nan
 
     return mode_values.iloc[0]
+
+def normalize_sleep_stage_label(label) -> str:
+    """
+    Normaliza una etiqueta de sueño para evitar problemas por espacios,
+    mayúsculas/minúsculas o variantes habituales.
+
+    Ejemplos:
+    - "n1" -> "N1"
+    - "NREM1" -> "N1"
+    - "Wake" -> "W"
+    - "REM" -> "REM"
+    """
+    if pd.isna(label):
+        return np.nan
+
+    label = str(label).strip().upper()
+
+    label_mapping = {
+        "WAKE": "W",
+        "W": "W",
+
+        "REM": "REM",
+        "R": "REM",
+
+        "N1": "N1",
+        "NREM1": "N1",
+        "S1": "N1",
+
+        "N2": "N2",
+        "NREM2": "N2",
+        "S2": "N2",
+
+        "N3": "N3",
+        "NREM3": "N3",
+        "S3": "N3",
+        "S4": "N3",
+    }
+
+    return label_mapping.get(label, label)
+
+
+def map_sleep_stage_to_3_phases(label):
+    """
+    Agrupa las etiquetas en 3 fases:
+    - W
+    - REM
+    - NREM = N1, N2, N3
+    """
+    label = normalize_sleep_stage_label(label)
+
+    if pd.isna(label):
+        return np.nan
+
+    if label in ["N1", "N2", "N3"]:
+        return "NREM"
+
+    if label in ["W", "REM"]:
+        return label
+
+    return np.nan
+
+
+def map_sleep_stage_to_4_phases(label):
+    """
+    Agrupa las etiquetas en 4 fases:
+    - W
+    - REM
+    - Light_Sleep = N1, N2
+    - Deep_Sleep = N3
+    """
+    label = normalize_sleep_stage_label(label)
+
+    if pd.isna(label):
+        return np.nan
+
+    if label in ["N1", "N2"]:
+        return "Light_Sleep"
+
+    if label == "N3":
+        return "Deep_Sleep"
+
+    if label in ["W", "REM"]:
+        return label
+
+    return np.nan
 
 
 def to_clean_numpy(series: pd.Series) -> np.ndarray:
@@ -1102,10 +1225,16 @@ def build_epoch_dataframe(
     rows = []
 
     for epoch_id, epoch_data in df.groupby("epoch_id", sort=True):
+
+        epoch_label = get_epoch_label(epoch_data[LABEL_COLUMN])
+        epoch_label = normalize_sleep_stage_label(epoch_label)
+
         row = {
             "subject_id": subject_id,
             "epoch_id": int(epoch_id),
-            "etiqueta": get_epoch_label(epoch_data[LABEL_COLUMN]),
+            "etiqueta": epoch_label,
+            "etiqueta_3_fases": map_sleep_stage_to_3_phases(epoch_label),
+            "etiqueta_4_fases": map_sleep_stage_to_4_phases(epoch_label),
         }
 
         row.update(
@@ -1140,6 +1269,8 @@ def build_epoch_dataframe(
         "subject_id",
         "epoch_id",
         "etiqueta",
+        "etiqueta_3_fases",
+        "etiqueta_4_fases",
 
         "BVP_mean",
         "BVP_median",
@@ -1288,19 +1419,23 @@ def build_extraction_report(
 
     return pd.DataFrame([report])
 
+def process_single_csv(input_csv: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Procesa un único CSV preprocesado y devuelve:
+    - DataFrame de épocas/features.
+    - DataFrame de informe para ese archivo.
 
+    Parameters
+    ----------
+    input_csv : Path
+        Ruta al CSV preprocesado de un sujeto.
 
-# =============================================================================
-# SCRIPT PRINCIPAL
-# =============================================================================
-
-def main() -> None:
-    input_csv = Path(INPUT_CSV)
-    output_dir = Path(OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if not input_csv.exists():
-        raise FileNotFoundError(f"No existe el CSV de entrada: {input_csv}")
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame]
+        epoch_df, report_df
+    """
+    print(f"Procesando: {input_csv.name}")
 
     df = pd.read_csv(input_csv)
     original_df = df.copy()
@@ -1308,7 +1443,6 @@ def main() -> None:
     subject_id = get_subject_id(df, input_csv)
 
     df = drop_respiratory_event_columns(df)
-
     df = add_epoch_id(df)
 
     epoch_df = build_epoch_dataframe(
@@ -1316,30 +1450,120 @@ def main() -> None:
         subject_id=subject_id,
     )
 
-    stem = input_csv.stem
-
-    output_csv = output_dir / f"{stem}_epochs_basic.csv"
-    report_csv = output_dir / f"{stem}_feature_extraction_report.csv"
-
-    epoch_df.to_csv(output_csv, index=False)
-
     report_df = build_extraction_report(
         original_df=original_df,
         cleaned_df=df,
         epoch_df=epoch_df,
     )
 
-    report_df.to_csv(report_csv, index=False)
+    report_df.insert(0, "source_file", input_csv.name)
+    report_df.insert(1, "subject_id", subject_id)
 
-    print("Extracción básica de features completada.")
-    print(f"CSV por épocas: {output_csv}")
-    print(f"Informe:        {report_csv}")
+    return epoch_df, report_df
+
+
+
+# =============================================================================
+# SCRIPT PRINCIPAL
+# =============================================================================
+def main() -> None:
+    input_dir = Path(INPUT_DIR)
+    output_dir = Path(OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_files = find_csv_files(
+        input_dir=input_dir,
+        recursive=RECURSIVE_SEARCH,
+    )
+
+    print(f"CSV encontrados: {len(csv_files)}")
     print()
-    print("Primeras épocas:")
-    print(epoch_df.head().to_string(index=False))
+
+    all_epoch_dfs = []
+    all_report_dfs = []
+
+    failed_files = []
+
+    for csv_file in csv_files:
+        try:
+            epoch_df, report_df = process_single_csv(csv_file)
+
+            all_epoch_dfs.append(epoch_df)
+            all_report_dfs.append(report_df)
+
+            print(
+                f"OK: {csv_file.name} "
+                f"→ {len(epoch_df)} épocas extraídas"
+            )
+            print()
+
+        except Exception as error:
+            failed_files.append(
+                {
+                    "source_file": csv_file.name,
+                    "error": str(error),
+                }
+            )
+
+            print(f"ERROR procesando {csv_file.name}: {error}")
+            print()
+
+    if len(all_epoch_dfs) == 0:
+        raise RuntimeError(
+            "No se ha podido procesar ningún CSV correctamente. "
+            "Revisa los errores anteriores."
+        )
+
+    final_epoch_df = pd.concat(
+        all_epoch_dfs,
+        axis=0,
+        ignore_index=True,
+    )
+
+    final_report_df = pd.concat(
+        all_report_dfs,
+        axis=0,
+        ignore_index=True,
+    )
+
+    output_csv = output_dir / OUTPUT_FILENAME
+    report_csv = output_dir / "dreamt_feature_extraction_report_by_subject.csv"
+    failed_csv = output_dir / "dreamt_feature_extraction_failed_files.csv"
+
+    final_epoch_df.to_csv(output_csv, index=False)
+    final_report_df.to_csv(report_csv, index=False)
+
+    if len(failed_files) > 0:
+        failed_df = pd.DataFrame(failed_files)
+        failed_df.to_csv(failed_csv, index=False)
+
+    print("Extracción de features completada.")
+    print(f"CSV final:        {output_csv}")
+    print(f"Informe sujetos:  {report_csv}")
+
+    if len(failed_files) > 0:
+        print(f"CSV con errores:  {failed_csv}")
+
     print()
-    print("Resumen:")
-    print(report_df.to_string(index=False))
+    print("Resumen global:")
+    print(f"Sujetos/archivos procesados correctamente: {len(all_epoch_dfs)}")
+    print(f"Archivos con error: {len(failed_files)}")
+    print(f"Épocas totales: {len(final_epoch_df)}")
+
+    if "etiqueta" in final_epoch_df.columns:
+        print()
+        print("Distribución de etiquetas originales:")
+        print(final_epoch_df["etiqueta"].value_counts(dropna=False).to_string())
+
+    if "etiqueta_3_fases" in final_epoch_df.columns:
+        print()
+        print("Distribución de etiquetas en 3 fases:")
+        print(final_epoch_df["etiqueta_3_fases"].value_counts(dropna=False).to_string())
+
+    if "etiqueta_4_fases" in final_epoch_df.columns:
+        print()
+        print("Distribución de etiquetas en 4 fases:")
+        print(final_epoch_df["etiqueta_4_fases"].value_counts(dropna=False).to_string())
 
 
 if __name__ == "__main__":
