@@ -105,8 +105,8 @@ from scipy.stats import skew, kurtosis
 # CONFIGURACIÓN DEL USUARIO
 # =============================================================================
 
-INPUT_DIR = r"C:\ruta\a\tu\carpeta_con_csv_preprocesados"
-OUTPUT_DIR = r"C:\ruta\a\tu\carpeta_de_salida"
+INPUT_DIR = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\preprocesados"
+OUTPUT_DIR = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data"
 
 OUTPUT_FILENAME = "dreamt_epoch_features.csv"
 

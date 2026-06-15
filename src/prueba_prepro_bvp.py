@@ -538,7 +538,7 @@ def main():
     # CONFIGURACIÓN MANUAL
     # ============================================================
 
-    csv_path = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\prueba.csv")
+    csv_path = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\S002.csv")
 
     output_dir = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\results\cheb")
 

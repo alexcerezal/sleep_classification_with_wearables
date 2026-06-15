@@ -48,8 +48,8 @@ from scipy.signal import find_peaks_cwt
 # CONFIGURACIÓN MANUAL
 # ============================================================
 
-INPUT_CSV = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\prueba.csv")
-OUTPUT_CSV = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\results\prepo\prueba_prepo.csv")
+INPUT_CSV = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\S002.csv")
+OUTPUT_CSV = Path(r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\results\prepo2\S002_prepo2.csv")
 
 FS_BVP = 64
 
