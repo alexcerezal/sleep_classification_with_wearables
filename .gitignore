@@ -10,8 +10,7 @@ doc/**
 
 # Version only the compiled dissertation PDF.
 !doc/
-!doc/main.pdf
-!doc/README.md
+!doc/doc.pdf
 
 # Python virtual environments and caches.
 .venv/
@@ -33,4 +32,5 @@ runs/
 checkpoints/
 references/
 docs/
+notebooks/
 
