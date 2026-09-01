@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import shap
+import analisis_shap
 import joblib
 import matplotlib
 
@@ -61,7 +61,7 @@ def save_global_importance(shap_by_class: dict[str, np.ndarray], X_sample: pd.Da
 def save_class_plots(shap_by_class: dict[str, np.ndarray], X_sample: pd.DataFrame) -> None:
     for class_name, class_values in shap_by_class.items():
         plt.figure(figsize=(10, 6))
-        shap.summary_plot(class_values, X_sample, show=False)
+        analisis_shap.summary_plot(class_values, X_sample, show=False)
         plt.title(f"SHAP summary for {class_name}")
         plt.tight_layout()
         output_path = RESULTS_DIR / SHAP_CLASS_TEMPLATE.format(class_name=class_name.lower())
@@ -78,7 +78,7 @@ def main() -> None:
     _, X_test, _, _ = split_dataset(df)
     X_sample = X_test.sample(n=min(SHAP_SAMPLE_SIZE, len(X_test)), random_state=RANDOM_STATE)
 
-    explainer = shap.TreeExplainer(model)
+    explainer = analisis_shap.TreeExplainer(model)
     raw_shap_values = explainer.shap_values(X_sample)
     shap_by_class = normalize_shap_values(raw_shap_values, CLASS_NAMES)
 

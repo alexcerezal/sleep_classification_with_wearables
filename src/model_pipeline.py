@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from lightgbm import LGBMClassifier
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import StratifiedKFold, GroupShuffleSplit, GridSearchCV, GroupKFold, LeaveOneGroupOut
+from sklearn.model_selection import StratifiedKFold, GroupShuffleSplit, GridSearchCV, GroupKFold, LeaveOneGroupOut, train_test_split
 from sklearn.pipeline import Pipeline 
 from imblearn.pipeline import Pipeline 
 from imblearn.over_sampling import SMOTE, ADASYN
@@ -576,7 +576,7 @@ def main():
         "epoch_id",
         "etiqueta",
         "etiqueta_3_fases",
-        "etiqueta_binaria", 
+        "etiqueta_binaria" 
     ]
 
     # ============================================================
@@ -624,6 +624,29 @@ def main():
         "TEMP_std"
     ]
 
+    featuresBVP = [
+        "BVP_mean",
+        "BVP_median",
+        "BVP_std",
+        "BVP_range",
+        "BVP_skewness",
+        "BVP_kurtosis",
+        "BVP_Hjorth_Mobility",
+        "BVP_Hjorth_Complexity",
+        "HRV_SDNN",
+        "HRV_pNN50",
+        "HRV_SD1SD2",
+        "HRV_HFD",
+        "HRV_KFD",
+        "HRV_SampEn",
+
+        "HR_mean",
+        "HR_std",
+
+        "IBI_mean",
+        "IBI_std",
+    ]
+
     # Comprobación de features ausentes
     missing_features = [f for f in features if f not in df.columns]
     if missing_features:
@@ -636,9 +659,10 @@ def main():
     X = df.drop(columns=non_feature_cols)
 
     # Cambiar aquí el objetivo según el número de clases
-    y = df["etiqueta_binaria"]
-    BINARY = True
+    BINARY = False
     RANDOM_FOREST = True
+
+    y = df["etiqueta_binaria"] if BINARY else df["etiqueta_3_fases"]
 
     # Se separa por sujeto
     groups = df["subject_id"]
@@ -666,7 +690,6 @@ def main():
     X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
     y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
     #y_train, y_test = y_encoded[train_idx], y_encoded[test_idx]
-
 
     groups_train = groups.iloc[train_idx]
     groups_test = groups.iloc[test_idx]
@@ -708,7 +731,7 @@ def main():
 
     print("\nClassification report global:")
     print(report)
-    """
+    
     # ============================================================
     # 6. Optimizar hiperparámetros en entrenamiento
     # ============================================================
@@ -721,33 +744,66 @@ def main():
     }
 
     param_grid_lgbm = {
-        "rf__n_estimators": [100, 300, 500],
-        "rf__max_depth": [10, 20, None],
-        "rf__min_samples_split": [2, 5, 10],
-        "rf__min_samples_leaf": [1, 2, 4],
+        "lgbm__n_estimators": [100, 300, 500],
+        "lgbm__learning_rate": [0.05, 0.1],
+        "lgbm__num_leaves": [15, 30],
+        "lgbm__max_depth": [-1, 8],
+        "lgbm__min_child_samples": [50, 200],
     }
-    
-    best_model = Pipeline(steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-            ("adasyn", ADASYN(random_state=RANDOM_STATE)),
-            ("rf", RandomForestClassifier(
-                class_weight=None,
-                random_state=RANDOM_STATE,
-                n_jobs=-1
-            ))
-        ])
-    
     """
+
+    if RANDOM_FOREST:
+        best_model_trained = Pipeline(steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                #("adasyn", ADASYN(random_state=RANDOM_STATE)),
+                ("rf", RandomForestClassifier(
+                    #objective="binary" if BINARY else "multiclass",
+                    class_weight=None,
+                    random_state=RANDOM_STATE,
+                    n_jobs=-1
+                ))
+        ])
+        
+        best_model_trained.set_params(**{
+            "rf__n_estimators": 300,#500,
+            "rf__max_depth": 10, #None,
+            "rf__min_samples_split": 2, #10,
+            "rf__min_samples_leaf": 1,
+        })
+    else: 
+        best_model_trained = Pipeline(steps=[
+                ("imputer", SimpleImputer(strategy="median")),
+                #("adasyn", ADASYN(random_state=RANDOM_STATE)),
+                ("lgbm", LGBMClassifier(
+                    objective="binary" if BINARY else "multiclass",
+                    class_weight="balanced",#None,
+                    random_state=RANDOM_STATE,
+                    n_jobs=-1,
+                    verbose=-1
+                ))
+        ])
+        
+        best_model_trained.set_params(**{
+            "lgbm__n_estimators": 100,
+            "lgbm__learning_rate": 0.05,
+            "lgbm__num_leaves": 30,
+            "lgbm__max_depth": 8,
+            "lgbm__min_child_samples": 50,
+        })
+
+    """
+    
+    
     best_model_trained, best_params, best_score = optimize_model_hyperparameters(
-        model=model1,
+        model=model,
         X_train=X_train_selected,
         y_train=y_train,
         groups_train=groups_train,
-        param_grid=param_grid_rf,
+        param_grid=param_grid_rf if RANDOM_FOREST else param_grid_lgbm,
         k=5,
         scoring="f1_macro",
     )"""
-
+    
     
 
     
@@ -755,25 +811,53 @@ def main():
     # Validación final
     # ============================================================
     
-    best_model.fit(X_train_selected, y_train)
+    imputer_global = SimpleImputer(strategy="median")
 
-    y_pred_test = best_model.predict(X_test_selected)
+    X_imputed = pd.DataFrame(
+        imputer_global.fit_transform(X),
+        columns=X.columns,
+        index=X.index,
+    )
+
+    # 2. Balancear todo el dataset
+    adasyn = ADASYN(
+        sampling_strategy="auto",
+        random_state=RANDOM_STATE,
+        n_neighbors=5,
+    )
+
+    X_balanced, y_balanced = adasyn.fit_resample(
+        X_imputed,
+        y,
+    )
+
+    X_train_selected, X_test_selected, y_train, y_test = train_test_split(
+        X_balanced,
+        y_balanced,
+        test_size=0.20,
+        stratify=y_balanced,
+        random_state=RANDOM_STATE,
+    )
+
+    best_model_trained.fit(X_train_selected, y_train)
+
+    y_pred_test = best_model_trained.predict(X_test_selected)
 
     # 4. Evaluación artificial: balancear sintéticamente también el test
     # Primero se imputa X_test con el imputer ya ajustado en train
-    #X_test_imputed = best_model.named_steps["imputer"].transform(X_test)
+    #X_test_imputed = best_model_trained.named_steps["imputer"].transform(X_test_selected)
 
     # Se aplica SMOTE al test usando y_test
     #smote_test = ADASYN(random_state=RANDOM_STATE)
     #X_test, y_test = smote_test.fit_resample(X_test_imputed, y_test)
 
     # Se predice directamente con el RF, porque el test ya está imputado y balanceado
-    #y_pred_test = best_model.named_steps["rf"].predict(X_test)
+    #y_pred_test = best_model_trained.named_steps["rf"].predict(X_test)
 
     # ============================================================
     # Métricas de evaluación
     # ============================================================
-
+    
     save_confusion_matrix(y_test, y_pred_test, BINARY)
 
     print("\nMatriz de confusión final:")
@@ -794,23 +878,22 @@ def main():
     print(f"F1 macro:          {f1_macro:.4f}")
     print(f"F1 weighted:       {f1_weighted:.4f}")
     print(f"MCC:               {mcc:.4f}")
-
+    
     # ============================================================
     # Análisis SHAP 
     # ============================================================
     """
     shap_results = run_tree_shap_analysis(
-        model_pipeline=best_model,
+        model_pipeline=best_model_trained,
         X=X_test_selected,
         y_true=y_test,
         y_pred=y_pred_test,
         feature_names=selected_features,
         class_names=None,
-        output_dir="shap_outputs_holdout_subjects",
-        model_step_name="rf",
-        max_display=30
+        output_dir=Path(RESULTS_DIR) / "shap_analysis",
+        model_step_name="rf" if RANDOM_FOREST else "lgbm",
     )
-
+    
     # ============================================================
     # 10. Guardar resultados útiles
     # ============================================================

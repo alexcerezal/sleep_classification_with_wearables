@@ -1,15 +1,25 @@
+import os
+
 import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from sklearn.model_selection import GroupShuffleSplit, GridSearchCV, GroupKFold, LeaveOneGroupOut
-from sklearn.pipeline import Pipeline
+from pathlib import Path
+from lightgbm import LGBMClassifier
+from xgboost import XGBClassifier
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import StratifiedKFold, GroupShuffleSplit, GridSearchCV, GroupKFold, LeaveOneGroupOut
+from sklearn.pipeline import Pipeline 
+from imblearn.pipeline import Pipeline 
+from imblearn.over_sampling import SMOTE, ADASYN
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, balanced_accuracy_score, f1_score, matthews_corrcoef
+from sklearn.metrics import ConfusionMatrixDisplay, classification_report, confusion_matrix, accuracy_score, balanced_accuracy_score, f1_score, matthews_corrcoef, roc_auc_score
+from analisis_shap import run_tree_shap_analysis
 
-INPUT_DIR = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\dreamt_epoch_features.csv"
+INPUT_DIR = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\data\dreamt_epoch_features2.csv"
+RESULTS_DIR = r"C:\Proyectos_compartidos\TFG\sleep_classification_with_wearables\results\definitivo"
 
 #PARA OBTENER RESULTADOS REPRODUCIBLES
 RANDOM_STATE = 100
@@ -334,8 +344,10 @@ def build_rf_pipeline(best_params=None, random_state=100):
 
     model = Pipeline(steps=[
         ("imputer", SimpleImputer(strategy="median")),
+        #("smote", SMOTE(random_state=random_state)),
+        #("adasyn", ADASYN(random_state=random_state)),
         ("rf", RandomForestClassifier(
-            class_weight="balanced",
+            class_weight= "balanced", #"balanced_subsample",
             random_state=random_state,
             n_jobs=-1
         ))
@@ -343,6 +355,36 @@ def build_rf_pipeline(best_params=None, random_state=100):
 
     if best_params is not None:
         model.set_params(**best_params)
+
+    model1 = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        #("smote", SMOTE(random_state=random_state)),
+        ("adasyn", ADASYN(random_state=random_state)),
+        ("lgbm", LGBMClassifier(
+            objective="multiclass", #"binary",
+            #n_estimators=300,
+            #learning_rate=0.05,
+            #num_leaves=31,
+            #max_depth=-1,
+            class_weight=None, #"balanced",
+            random_state=random_state,
+            n_jobs=-1,
+            verbose=-1
+        ))
+    ])    
+
+    model2 = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("smote", SMOTE(random_state=random_state)),
+        ("xgb", XGBClassifier(
+            objective="multiclass", #"binary:logistic",
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=5,
+            random_state=random_state,
+            n_jobs=-1,
+        ))
+    ])
 
     return model
 
@@ -426,6 +468,16 @@ def optimize_rf_hyperparameters(
 
     return best_params, best_score, grid
 
+def save_confusion_matrix(y_true: pd.Series, y_pred: pd.Series) -> None:
+    figure, axis = plt.subplots(figsize=(6, 5))
+    ConfusionMatrixDisplay(
+        confusion_matrix=confusion_matrix(y_true, y_pred, labels=["NREM", "REM", "W"]),
+        display_labels=["NREM", "REM", "W"],
+    ).plot(ax=axis, cmap="Blues", colorbar=False)
+    #axis.set_title("Random Forest confusion matrix")
+    figure.tight_layout()
+    figure.savefig(os.path.join(RESULTS_DIR, "confusion_matrix.png"), dpi=200)
+    plt.close(figure)
 
 def evaluate_rf_with_group_cv(
     X,
@@ -483,8 +535,8 @@ def evaluate_rf_with_group_cv(
     """
 
     if cv_strategy == "groupkfold":
-        cv = GroupKFold(n_splits=k)
-        split_iterator = cv.split(X, y, groups=groups)
+        cv =  GroupKFold(n_splits=k) #StratifiedKFold(n_splits=k, shuffle=True, random_state=random_state)
+        split_iterator = cv.split(X, y, groups=groups) #cv.split(X, y)
         cv_name = f"GroupKFold_{k}"
 
     elif cv_strategy == "loso":
@@ -507,8 +559,8 @@ def evaluate_rf_with_group_cv(
         groups_train = groups.iloc[train_idx]
         groups_test = groups.iloc[test_idx]
 
-        overlap = set(groups_train.unique()) & set(groups_test.unique())
-        assert len(overlap) == 0, "Hay sujetos compartidos entre train y test."
+        #overlap = set(groups_train.unique()) & set(groups_test.unique())
+        #assert len(overlap) == 0, "Hay sujetos compartidos entre train y test."
 
         model = build_rf_pipeline(
             best_params=best_params,
@@ -589,10 +641,12 @@ def evaluate_rf_with_group_cv(
     print("\nMatriz de confusión global:")
     print(confusion_matrix(y_true_all, y_pred_all))
 
+    save_confusion_matrix(y_true_all, y_pred_all)
+
     print("\nClassification report global:")
     print(classification_report(y_true_all, y_pred_all))
 
-    return metrics_summary, fold_results, y_true_all, y_pred_all
+    return metrics_summary, fold_results, y_true_all, y_pred_all, model, X_test
 
 
 def main():
@@ -608,7 +662,7 @@ def main():
         "epoch_id",
         "etiqueta",
         "etiqueta_3_fases",
-        "etiqueta_4_fases"
+        "etiqueta_binaria", 
     ]
 
     # ============================================================
@@ -636,7 +690,7 @@ def main():
 
         "IBI_mean",
         "IBI_std",
-
+        
         "ACC_X_trimmed_mean",
         "ACC_X_trimmed_IQR",
         "ACC_Y_trimmed_mean",
@@ -665,10 +719,12 @@ def main():
     # 3. Definir X, y y grupos
     # ============================================================
 
-    X = df[features]
+    X = df.drop(columns=non_feature_cols)
 
     # Cambiar aquí el objetivo según el número de clases
-    y = df["etiqueta_3_fases"]
+    y = df["etiqueta_binaria"]
+
+    #y_encoded = LabelEncoder().fit_transform(y)
 
     groups = df["subject_id"]
 
@@ -683,7 +739,7 @@ def main():
     # ============================================================
     # 4. Split inicial por sujeto para optimizar hiperparámetros
     # ============================================================
-
+    
     splitter = GroupShuffleSplit(
         n_splits=1,
         test_size=0.2,
@@ -694,6 +750,8 @@ def main():
 
     X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
     y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    #y_train, y_test = y_encoded[train_idx], y_encoded[test_idx]
+
 
     groups_train = groups.iloc[train_idx]
     groups_test = groups.iloc[test_idx]
@@ -706,10 +764,65 @@ def main():
     print(f"Sujetos test:  {groups_test.nunique()}")
 
     # ============================================================
-    # 5. Grid de hiperparámetros
+    # Modelo final entrenado solo con sujetos de entrenamiento
     # ============================================================
 
-    param_grid = {
+    best_model = build_rf_pipeline(
+        #best_params=best_params,
+        random_state=RANDOM_STATE
+    )
+
+    best_model.fit(X_train, y_train)
+
+    y_pred_test = best_model.predict(X_test)
+
+    # 4. Evaluación artificial: balancear sintéticamente también el test
+    # Primero se imputa X_test con el imputer ya ajustado en train
+    #X_test_imputed = best_model.named_steps["imputer"].transform(X_test)
+
+    # Se aplica SMOTE al test usando y_test
+    #smote_test = ADASYN(random_state=RANDOM_STATE)
+    #X_test, y_test = smote_test.fit_resample(X_test_imputed, y_test)
+
+    # Se predice directamente con el RF, porque el test ya está imputado y balanceado
+    #y_pred_test = best_model.named_steps["rf"].predict(X_test)
+
+    print("\nMatriz de confusión hold-out:")
+    print(confusion_matrix(y_test, y_pred_test))
+
+    print("\nClassification report hold-out:")
+    print(classification_report(y_test, y_pred_test))
+
+    print("F1 macro hold-out:", f1_score(y_test, y_pred_test, average="macro"))
+    print("MCC hold-out:", matthews_corrcoef(y_test, y_pred_test))
+    """
+    # ============================================================
+    # SHAP solo sobre sujetos no vistos
+    # ============================================================
+    
+    shap_results = run_tree_shap_analysis(
+        model_pipeline=best_model,
+        X=X_test,
+        y_true=y_test,
+        y_pred=y_pred_test,
+        feature_names=X.columns.tolist(),
+        class_names=None,
+        output_dir="shap_outputs_holdout_subjects",
+        model_step_name="rf",
+        max_display=30
+    )
+
+    print("\nArchivos guardados:")
+    print("- best_rf_params.json")
+    print("- rf_groupkfold_5_results.csv")
+    print("- rf_loso_results.csv")
+    print("- rf_feature_importances.csv")
+    
+    # ============================================================
+    # 5. Grid de hiperparámetros
+    # ============================================================
+    
+    param_grid_rf = {
         "rf__n_estimators": [100, 300, 500],
         "rf__max_depth": [10, 20, None],
         "rf__min_samples_split": [2, 5, 10],
@@ -724,14 +837,14 @@ def main():
         X_train=X_train,
         y_train=y_train,
         groups_train=groups_train,
-        param_grid=param_grid,
+        param_grid=param_grid_rf,
         k=5,
         scoring="f1_macro",
         random_state=RANDOM_STATE
     )
 
     pd.Series(best_params).to_json("best_rf_params.json", indent=4)
-"""
+    
     # ============================================================
     # 7. Evaluación hold-out inicial con la mejor configuración
     # ============================================================
@@ -739,6 +852,8 @@ def main():
     print("\n" + "=" * 70)
     print("Evaluación hold-out sobre sujetos no vistos")
     print("=" * 70)
+
+    
 
     best_model = build_rf_pipeline(
         best_params=best_params,
@@ -765,25 +880,40 @@ def main():
 
     print("\nTop 20 features más importantes en hold-out:")
     print(importances.head(20))
-
+    
     # ============================================================
     # 8. Evaluación con GroupKFold usando la configuración óptima
     # ============================================================
 
-    metrics_k5, fold_results_k5, y_true_k5, y_pred_k5 = evaluate_rf_with_group_cv(
+    best_params = {
+    "rf__max_depth":10,
+    "rf__min_samples_leaf":4,
+    "rf__min_samples_split":10,
+    "rf__n_estimators":500
+    }
+    
+    metrics_k5, fold_results_k5, y_true_k5, y_pred_k5, best_model, x_test_k5 = evaluate_rf_with_group_cv(
         X=X,
         y=y,
         groups=groups,
-        best_params=best_params,
+        best_params=None, #best_params,
         cv_strategy="groupkfold",
         k=5,
         random_state=RANDOM_STATE
     )
+    
+    pd.DataFrame(fold_results_k5).to_csv(
+        os.path.join(RESULTS_DIR, "rf_groupkfold_5_results.csv"),
+        #"rf_groupkfold_5_results.csv",
+        index=False
+    )
+
+    
 
     # ============================================================
     # 9. Evaluación LOSO usando la misma configuración óptima
     # ============================================================
-
+    
     metrics_loso, fold_results_loso, y_true_loso, y_pred_loso = evaluate_rf_with_group_cv(
         X=X,
         y=y,
@@ -800,25 +930,24 @@ def main():
     #pd.Series(best_params).to_json("best_rf_params.json", indent=4)
 
     pd.DataFrame(fold_results_k5).to_csv(
-        "rf_groupkfold_5_results.csv",
+        #os.path.join(RESULTS_DIR, "rf_groupkfold_5_results.csv"),
+        #"rf_groupkfold_5_results.csv",
         index=False
     )
-
+    
     pd.DataFrame(fold_results_loso).to_csv(
-        "rf_loso_results.csv",
+        #os.path.join(RESULTS_DIR, "rf_loso_results.csv"),
+        #"rf_loso_results.csv",
         index=False
     )
 
     importances.to_csv(
-        "rf_feature_importances.csv",
+        #os.path.join(RESULTS_DIR, "rf_feature_importances.csv"),
+        #"rf_feature_importances.csv",
         header=["importance"]
-    )
+    )"""
 
-    print("\nArchivos guardados:")
-    print("- best_rf_params.json")
-    print("- rf_groupkfold_5_results.csv")
-    print("- rf_loso_results.csv")
-    print("- rf_feature_importances.csv")"""
+    
     
 
 

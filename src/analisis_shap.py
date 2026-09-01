@@ -28,6 +28,11 @@ def _normalize_multiclass_shap_values(
 
     # Caso binario o regresión: array 2D
     if shap_values_raw.ndim == 2:
+        if n_classes == 2:
+            return [
+                -shap_values_raw,  # contribución para la clase 0
+                shap_values_raw,   # contribución para la clase 1
+            ]
         return [shap_values_raw]
 
     # Caso: (n_samples, n_features, n_classes)
@@ -259,11 +264,22 @@ def run_tree_shap_analysis(
         if "imputer" in named_steps:
             X_transformed = named_steps["imputer"].transform(X)
 
-            X_shap = pd.DataFrame(
-                X_transformed,
-                columns=feature_names,
-                index=X.index
-            )
+            #X_shap = pd.DataFrame(
+            #    X_transformed,
+            #    columns=feature_names,
+            #    index=X.index
+            #)
+
+            if isinstance(X_transformed, pd.DataFrame):
+                X_shap = X_transformed.copy()
+                X_shap = X_shap[feature_names]
+                X_shap.index = X.index
+            else:
+                X_shap = pd.DataFrame(
+                    X_transformed,
+                    columns=feature_names,
+                    index=X.index
+                )
         else:
             X_shap = X.copy()
 
